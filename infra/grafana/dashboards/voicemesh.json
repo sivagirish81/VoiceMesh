@@ -1,0 +1,28 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Pipeline Stage Latency",
+      "targets": [{"expr": "rate(voicemesh_stage_latency_ms_sum[1m]) / rate(voicemesh_stage_latency_ms_count[1m])"}],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+    },
+    {
+      "type": "timeseries",
+      "title": "Backpressure and Duplicates",
+      "targets": [
+        {"expr": "increase(voicemesh_backpressure_total[5m])", "legendFormat": "cork events"},
+        {"expr": "increase(voicemesh_duplicate_events_total[5m])", "legendFormat": "duplicates"}
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+    }
+  ],
+  "schemaVersion": 40,
+  "tags": ["voicemesh", "voice", "reliability"],
+  "templating": {"list": []},
+  "time": {"from": "now-15m", "to": "now"},
+  "title": "VoiceMesh Reliability Lab",
+  "uid": "voicemesh"
+}
+
