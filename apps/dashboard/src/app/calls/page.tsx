@@ -1,9 +1,9 @@
 import Link from "next/link";
-import {API_URL, Call} from "@/lib/api";
+import {Call, SERVER_API_URL} from "@/lib/api";
 
 async function getCalls(): Promise<Call[]> {
   try {
-    const response = await fetch(`${API_URL}/calls`, {cache: "no-store"});
+    const response = await fetch(`${SERVER_API_URL}/calls`, {cache: "no-store"});
     return response.ok ? response.json() : [];
   } catch {
     return [];
@@ -38,4 +38,3 @@ export default async function CallsPage() {
     </div>
   );
 }
-

@@ -6,9 +6,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 COPY pyproject.toml README.md ./
-COPY apps ./apps
-COPY scripts ./scripts
+COPY apps/__init__.py ./apps/__init__.py
 RUN pip install --upgrade pip && pip install .
+COPY apps/api ./apps/api
+COPY apps/worker ./apps/worker
+COPY scripts ./scripts
 
 CMD ["uvicorn", "apps.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
-

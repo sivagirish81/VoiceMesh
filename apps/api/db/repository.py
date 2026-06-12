@@ -233,7 +233,11 @@ class PostgresRepository:
             "SELECT * FROM call_events WHERE call_id=$1 ORDER BY created_at, sequence_number",
             call_id,
         )
-        return [dict(row) for row in rows]
+        events = [dict(row) for row in rows]
+        for event in events:
+            if isinstance(event["payload"], str):
+                event["payload"] = json.loads(event["payload"])
+        return events
 
     async def get_metrics(self, call_id: str) -> list[dict[str, Any]]:
         rows = await self._require_pool().fetch(

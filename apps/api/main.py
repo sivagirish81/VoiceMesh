@@ -45,22 +45,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         producer = KafkaEventProducer(runtime_settings.kafka_bootstrap_servers)
         temporal = TemporalLifecycleClient(runtime_settings)
-        await repository.connect()
-        await producer.start()
-        await temporal.connect()
-        outbox = OutboxPublisher(repository, producer)
-        outbox_task = asyncio.create_task(outbox.run())
-        application.state.settings = runtime_settings
-        application.state.failure_injector = injector
-        application.state.repository = repository
-        application.state.producer = producer
-        application.state.temporal = temporal
-        application.state.outbox = outbox
+        outbox: OutboxPublisher | None = None
+        outbox_task: asyncio.Task[None] | None = None
         try:
+            await repository.connect()
+            await producer.start()
+            await temporal.connect()
+            outbox = OutboxPublisher(repository, producer)
+            outbox_task = asyncio.create_task(outbox.run())
+            application.state.settings = runtime_settings
+            application.state.failure_injector = injector
+            application.state.repository = repository
+            application.state.producer = producer
+            application.state.temporal = temporal
+            application.state.outbox = outbox
             yield
         finally:
-            outbox.stop()
-            await outbox_task
+            if outbox:
+                outbox.stop()
+            if outbox_task:
+                await outbox_task
             await producer.stop()
             await repository.close()
 
