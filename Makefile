@@ -36,7 +36,7 @@ demo-normal-call:
 	python scripts/demo_normal_call.py
 
 demo-tts-backpressure:
-	python scripts/demo_tts_backpressure.py
+	docker compose exec -T api python scripts/demo_tts_backpressure.py
 
 demo-db-down:
 	./scripts/demo_db_down.sh
