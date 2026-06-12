@@ -118,10 +118,12 @@ make demo-kill-worker
 
 ### TTS Backpressure
 
-`make demo-tts-backpressure` injects 1.5 seconds of delay per TTS audio chunk. LLM
-tokens continue entering a bounded queue until the high watermark is reached. The
-pipeline emits `pipeline.corked`, preserves all tokens, and blocks upstream writes.
-Removing the delay drains the queue and emits `pipeline.uncorked`.
+`make demo-tts-backpressure` requires no microphone. It uses OpenAI TTS to create a
+spoken test prompt, streams that PCM through the normal WebSocket path, and injects
+400 ms of delay per TTS output chunk. LLM tokens enter the bounded queue until the
+high watermark is reached and the pipeline emits `pipeline.corked`. Four seconds
+later the script removes the delay, verifies `pipeline.uncorked`, and prints links to
+the persisted call timeline and Jaeger trace.
 
 ### Duplicate Event Replay
 
@@ -229,6 +231,8 @@ Topics are `call-events`, `pipeline-events`, `provider-events`, `outbox-events`,
 - The browser uses `ScriptProcessorNode` for broad POC simplicity. An AudioWorklet is
   the production migration path.
 - OpenAI STT is turn-finalized rather than partial streaming transcription.
+- Partial transcript coalescing is therefore not implemented in this POC; the
+  backpressure demo preserves and throttles LLM tokens and final text instead.
 - Phrase-level TTS starts at punctuation or 120 characters; it is not semantic chunking.
 - Only OpenAI providers are implemented. Local-provider extension points are real, but
   Whisper/Ollama/Piper adapters are future work.

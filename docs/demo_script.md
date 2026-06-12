@@ -26,9 +26,10 @@ Run:
 make demo-tts-backpressure
 ```
 
-Ask a question that produces several sentences. Show `llm_to_tts` growing, the pipeline
-entering `corked`, and `pipeline.corked` in the event feed. Reset injection in the
-dashboard. Show the queue drain and `pipeline.uncorked`.
+No microphone is required. The command generates spoken input with OpenAI, injects
+400 ms of delay per TTS output chunk, and prints `llm_to_tts` queue depth as it grows.
+Show the pipeline entering `corked`. The command removes the delay after four seconds,
+verifies the queue drains and uncorks, then prints the call timeline and Jaeger links.
 
 ## 1:35-1:55 — Duplicate Delivery
 
@@ -65,4 +66,3 @@ Show the worker stop and restart. Refresh Temporal UI and show that the workflow
 history survived and processing continued. Close with the design split: Kafka for
 throughput and replay, Temporal for durable lifecycle, Postgres for idempotent query
 state, and OTel for correlated evidence.
-
