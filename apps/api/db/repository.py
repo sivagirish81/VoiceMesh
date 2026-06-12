@@ -1,8 +1,8 @@
 import asyncio
 import json
 import logging
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Awaitable, Callable, Sequence
+from typing import Any, TypeVar, cast
 
 import asyncpg
 from opentelemetry import trace
@@ -13,6 +13,7 @@ from apps.api.telemetry.metrics import DB_WRITE_FAILURES, DUPLICATE_EVENTS
 
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
+T = TypeVar("T")
 
 
 class PostgresRepository:
@@ -49,14 +50,16 @@ class PostgresRepository:
             raise RuntimeError("Postgres repository is not connected")
         return self.pool
 
-    async def _retry(self, operation: Any, *, critical: bool = False) -> Any:
+    async def _retry(
+        self, operation: Callable[[], Awaitable[T]], *, critical: bool = False
+    ) -> T | None:
         last_error: Exception | None = None
         for attempt in range(3):
             try:
                 if self._failure_injector.postgres_failure:
                     raise asyncpg.PostgresConnectionError("Injected Postgres write failure")
                 return await operation()
-            except (asyncpg.PostgresError, OSError, asyncio.TimeoutError) as exc:
+            except (asyncpg.PostgresError, OSError, TimeoutError) as exc:
                 last_error = exc
                 DB_WRITE_FAILURES.inc()
                 logger.warning(
@@ -72,24 +75,29 @@ class PostgresRepository:
         self, call_id: str, stt_provider: str, llm_provider: str, tts_provider: str
     ) -> bool:
         async def operation() -> str:
-            return await self._require_pool().execute(
-                """
-                INSERT INTO calls (
-                    call_id, status, started_at, selected_stt_provider,
-                    selected_llm_provider, selected_tts_provider
-                ) VALUES ($1, 'CALL_STARTED', NOW(), $2, $3, $4)
-                ON CONFLICT (call_id) DO NOTHING
-                """,
-                call_id,
-                stt_provider,
-                llm_provider,
-                tts_provider,
+            return cast(
+                str,
+                await self._require_pool().execute(
+                    """
+                    INSERT INTO calls (
+                        call_id, status, started_at, selected_stt_provider,
+                        selected_llm_provider, selected_tts_provider
+                    ) VALUES ($1, 'CALL_STARTED', NOW(), $2, $3, $4)
+                    ON CONFLICT (call_id) DO NOTHING
+                    """,
+                    call_id,
+                    stt_provider,
+                    llm_provider,
+                    tts_provider,
+                ),
             )
 
         result = await self._retry(operation)
         return result == "INSERT 0 1"
 
-    async def persist_event(self, event: PipelineEvent, *, critical: bool = False) -> bool:
+    async def persist_event(
+        self, event: PipelineEvent, *, critical: bool = False
+    ) -> bool | None:
         async def operation() -> bool:
             pool = self._require_pool()
             async with pool.acquire() as connection, connection.transaction():
@@ -142,8 +150,7 @@ class PostgresRepository:
         with tracer.start_as_current_span("postgres.persist_event") as span:
             span.set_attribute("call_id", event.call_id)
             span.set_attribute("idempotency_key", event.idempotency_key)
-            result = await self._retry(operation, critical=critical)
-            return bool(result)
+            return await self._retry(operation, critical=critical)
 
     async def update_call_state(
         self,
@@ -235,22 +242,25 @@ class PostgresRepository:
         return [dict(row) for row in rows]
 
     async def metrics_summary(self) -> Sequence[asyncpg.Record]:
-        return await self._require_pool().fetch(
-            """
-            SELECT stage,
-                   percentile_cont(0.50) WITHIN GROUP (ORDER BY latency_ms) AS p50,
-                   percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95,
-                   percentile_cont(0.99) WITHIN GROUP (ORDER BY latency_ms) AS p99,
-                   COUNT(*) AS samples
-            FROM pipeline_metrics
-            GROUP BY stage
-            ORDER BY stage
-            """
+        return cast(
+            Sequence[asyncpg.Record],
+            await self._require_pool().fetch(
+                """
+                SELECT stage,
+                       percentile_cont(0.50) WITHIN GROUP (ORDER BY latency_ms) AS p50,
+                       percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95,
+                       percentile_cont(0.99) WITHIN GROUP (ORDER BY latency_ms) AS p99,
+                       COUNT(*) AS samples
+                FROM pipeline_metrics
+                GROUP BY stage
+                ORDER BY stage
+                """
+            ),
         )
 
     async def health(self) -> bool:
         try:
-            return await self._require_pool().fetchval("SELECT TRUE")
+            return bool(await self._require_pool().fetchval("SELECT TRUE"))
         except Exception:
             return False
 
@@ -258,4 +268,3 @@ class PostgresRepository:
         await self._require_pool().execute(
             "TRUNCATE call_events, idempotency_keys, outbox_events, pipeline_metrics, calls"
         )
-

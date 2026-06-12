@@ -4,6 +4,7 @@ from enum import StrEnum
 from typing import Any
 
 from temporalio import workflow
+from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from apps.worker.activities import (
@@ -138,7 +139,7 @@ class CallWorkflow:
             persist_call_state,
             {"call_id": self.call_id, "state": str(self.state)},
             start_to_close_timeout=timedelta(seconds=15),
-            retry_policy=workflow.RetryPolicy(
+            retry_policy=RetryPolicy(
                 initial_interval=timedelta(milliseconds=250),
                 backoff_coefficient=2,
                 maximum_interval=timedelta(seconds=5),
@@ -169,4 +170,3 @@ class CallWorkflow:
     @workflow.query
     def current_state(self) -> str:
         return str(self.state)
-

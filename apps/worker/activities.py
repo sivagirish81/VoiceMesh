@@ -1,6 +1,6 @@
 import json
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import asyncpg
@@ -16,7 +16,7 @@ async def _execute(query: str, *args: Any) -> str:
     settings = get_settings()
     connection = await asyncpg.connect(settings.database_url)
     try:
-        return await connection.execute(query, *args)
+        return cast(str, await connection.execute(query, *args))
     finally:
         await connection.close()
 
@@ -108,4 +108,3 @@ async def mark_call_failed(data: dict[str, Any]) -> None:
         data["call_id"],
         data.get("error", "unknown workflow failure"),
     )
-
