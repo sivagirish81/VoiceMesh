@@ -26,22 +26,22 @@ class BrowserWebSocketTransport(Transport):
         while not self._closed:
             with tracer.start_as_current_span("websocket.receive"):
                 message = await self.websocket.receive()
-                if message["type"] == "websocket.disconnect":
-                    self._closed = True
-                    return
-                if message.get("bytes") is not None:
-                    yield AudioFrame(
-                        data=message["bytes"],
-                        sample_rate=self.sample_rate,
-                        channels=self.channels,
-                    )
-                    continue
-                if message.get("text"):
-                    payload = json.loads(message["text"])
-                    if payload.get("type") == "audio.config":
-                        self.sample_rate = int(payload.get("sample_rate", 16000))
-                        self.channels = int(payload.get("channels", 1))
-                    yield payload
+            if message["type"] == "websocket.disconnect":
+                self._closed = True
+                return
+            if message.get("bytes") is not None:
+                yield AudioFrame(
+                    data=message["bytes"],
+                    sample_rate=self.sample_rate,
+                    channels=self.channels,
+                )
+                continue
+            if message.get("text"):
+                payload = json.loads(message["text"])
+                if payload.get("type") == "audio.config":
+                    self.sample_rate = int(payload.get("sample_rate", 16000))
+                    self.channels = int(payload.get("channels", 1))
+                yield payload
 
     async def receive_audio(self) -> AsyncIterator[bytes]:
         async for message in self.receive_messages():
@@ -66,4 +66,3 @@ class BrowserWebSocketTransport(Transport):
         if not self._closed:
             self._closed = True
             await self.websocket.close(code=code)
-

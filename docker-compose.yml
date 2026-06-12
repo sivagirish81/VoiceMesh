@@ -82,7 +82,7 @@ services:
     ports:
       - "7233:7233"
     environment:
-      DB: postgresql
+      DB: postgres12
       DB_PORT: 5432
       POSTGRES_USER: postgres
       POSTGRES_PWD: postgres
@@ -93,6 +93,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "temporal:7233"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
 
   temporal-ui:
     image: temporalio/ui:2.39.0
@@ -164,7 +169,7 @@ services:
       kafka-init:
         condition: service_completed_successfully
       temporal:
-        condition: service_started
+        condition: service_healthy
       otel-collector:
         condition: service_started
 
@@ -180,12 +185,13 @@ services:
       kafka-init:
         condition: service_completed_successfully
       temporal:
-        condition: service_started
+        condition: service_healthy
 
   dashboard:
     build:
       context: ./apps/dashboard
     environment:
+      API_INTERNAL_URL: http://api:8000
       NEXT_PUBLIC_API_URL: http://localhost:8000
       NEXT_PUBLIC_WS_URL: ws://localhost:8000
     ports:

@@ -1,10 +1,10 @@
 import {CallTimeline} from "@/components/CallTimeline";
 import {PipelineState} from "@/components/PipelineState";
-import {API_URL, Call, PipelineEvent} from "@/lib/api";
+import {Call, PipelineEvent, SERVER_API_URL} from "@/lib/api";
 
 async function load<T>(path: string): Promise<T | null> {
   try {
-    const response = await fetch(`${API_URL}${path}`, {cache: "no-store"});
+    const response = await fetch(`${SERVER_API_URL}${path}`, {cache: "no-store"});
     return response.ok ? response.json() : null;
   } catch {
     return null;
@@ -36,4 +36,3 @@ export default async function CallDetail({params}: {params: Promise<{call_id: st
     </div>
   );
 }
-

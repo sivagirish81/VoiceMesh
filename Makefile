@@ -2,7 +2,7 @@ SHELL := /bin/bash
 
 .PHONY: up down restart logs api worker dashboard migrate create-topics \
 	demo-normal-call demo-tts-backpressure demo-db-down demo-duplicate-events \
-	demo-kill-worker test lint
+	demo-kill-worker smoke-live-pipeline test lint
 
 up:
 	@test -f .env || (echo "Missing .env. Copy .env.example and set OPENAI_API_KEY." && exit 1)
@@ -47,6 +47,9 @@ demo-duplicate-events:
 demo-kill-worker:
 	./scripts/kill_worker_demo.sh
 
+smoke-live-pipeline:
+	docker compose exec -T api python scripts/smoke_live_pipeline.py
+
 test:
 	pytest -q
 
@@ -54,4 +57,3 @@ lint:
 	ruff check .
 	mypy apps
 	cd apps/dashboard && npm run lint
-

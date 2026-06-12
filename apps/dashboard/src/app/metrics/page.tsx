@@ -1,9 +1,9 @@
 import {LatencyChart, StageMetric} from "@/components/LatencyChart";
-import {API_URL} from "@/lib/api";
+import {SERVER_API_URL} from "@/lib/api";
 
 async function getMetrics(): Promise<StageMetric[]> {
   try {
-    const response = await fetch(`${API_URL}/metrics/summary`, {cache: "no-store"});
+    const response = await fetch(`${SERVER_API_URL}/metrics/summary`, {cache: "no-store"});
     if (!response.ok) return [];
     const body = await response.json();
     return body.stages.map((row: Record<string, string | number>) => ({
@@ -40,4 +40,3 @@ export default async function MetricsPage() {
     </div>
   );
 }
-

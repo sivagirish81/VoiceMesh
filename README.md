@@ -184,8 +184,13 @@ See [docs/otel_tracing.md](docs/otel_tracing.md).
 | `make dashboard` | Run Next.js locally |
 | `make migrate` | Reapply the idempotent SQL migration |
 | `make create-topics` | Create required Kafka topics |
+| `make smoke-live-pipeline` | Run a real OpenAI STT → LLM → TTS WebSocket smoke test |
 | `make test` | Run Python tests |
 | `make lint` | Run Ruff, mypy, and dashboard lint |
+
+`make smoke-live-pipeline` synthesizes a spoken prompt, sends its PCM through the same
+WebSocket contract as the browser, and verifies the persisted call outcome. It uses
+real OpenAI APIs and incurs normal API usage.
 
 ## Event Contract
 

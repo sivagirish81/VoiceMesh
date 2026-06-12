@@ -1,4 +1,5 @@
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+export const SERVER_API_URL = process.env.API_INTERNAL_URL ?? API_URL;
 export const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8000";
 
 export type Call = {
@@ -36,4 +37,3 @@ export async function fetchJson<T>(path: string, options?: RequestInit): Promise
   if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
   return response.json() as Promise<T>;
 }
-

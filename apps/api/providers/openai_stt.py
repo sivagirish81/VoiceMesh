@@ -20,11 +20,10 @@ class OpenAISTTProvider(STTProvider):
         if self._failure_injector:
             await self._failure_injector.before_provider("stt")
         audio_file = io.BytesIO(audio_bytes)
-        audio_file.name = "turn.webm"
+        audio_file.name = "turn.wav"
         result = await self._client.audio.transcriptions.create(
             model=self._model,
             file=audio_file,
             response_format="text",
         )
         return result if isinstance(result, str) else result.text
-
