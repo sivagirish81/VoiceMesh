@@ -16,10 +16,7 @@ def pcm_to_wav(pcm_bytes: bytes, sample_rate: int) -> bytes:
 
 
 async def transcribe_turn(
-    provider: STTProvider, pcm_bytes: bytes, sample_rate: int, timeout: float
+    provider: STTProvider, pcm_bytes: bytes, sample_rate: int, deadline_seconds: float
 ) -> str:
-    return await asyncio.wait_for(
-        provider.transcribe(pcm_to_wav(pcm_bytes, sample_rate)),
-        timeout=timeout,
-    )
-
+    async with asyncio.timeout(deadline_seconds):
+        return await provider.transcribe(pcm_to_wav(pcm_bytes, sample_rate))

@@ -73,7 +73,13 @@ class StreamModule:
                 EventType.CALL_STARTED,
                 "transport",
                 turn_id="session",
-                payload={"providers": {"stt": self.stt.name, "llm": self.llm.name, "tts": self.tts.name}},
+                payload={
+                    "providers": {
+                        "stt": self.stt.name,
+                        "llm": self.llm.name,
+                        "tts": self.tts.name,
+                    }
+                },
                 critical=True,
             )
             await self.transport.send_json("call.started", call_id=self.call_id)
@@ -389,7 +395,7 @@ class StreamModule:
         )
         await self.producer.publish(event)
         inserted = await self.repository.persist_event(event, critical=critical)
-        if not inserted:
+        if inserted is False:
             duplicate = PipelineEvent.create(
                 call_id=self.call_id,
                 turn_id=event.turn_id,
@@ -400,6 +406,31 @@ class StreamModule:
             )
             self.state.sequence_number += 1
             await self.producer.publish(duplicate)
+        elif inserted is None:
+            self.state.sequence_number += 1
+            db_failure = PipelineEvent.create(
+                call_id=self.call_id,
+                turn_id=event.turn_id,
+                event_type=EventType.POSTGRES_WRITE_FAILED,
+                stage="postgres",
+                sequence_number=self.state.sequence_number,
+                payload={
+                    "failed_event_type": str(event.event_type),
+                    "idempotency_key": event.idempotency_key,
+                },
+                trace_id=current_trace_id(),
+            )
+            await self.producer.publish(db_failure)
+            await self.transport.send_json(
+                "pipeline.event",
+                event=db_failure.model_dump(mode="json"),
+                state={
+                    "stage": stage,
+                    "corked": self.state.corked,
+                    "cork_reason": self.state.cork_reason,
+                    "queue_depths": self.state.queue_depths,
+                },
+            )
         await self.repository.update_call_state(self.call_id, stage=stage)
         await self.transport.send_json(
             "pipeline.event",
@@ -451,4 +482,3 @@ class StreamModule:
                 {"summary": self.state.response},
             )
             await self.transport.send_json("call.ended", call_id=self.call_id)
-
