@@ -65,9 +65,9 @@ Those streams multiply broker traffic, storage, consumer cost, and sensitive-dat
 surface area. For debugging, use bounded sampling, per-call diagnostic flags, aggregate
 events, metrics, or traces.
 
-The current POC publishes `llm.token`, `tts.audio_chunk`, and
-`transport.audio_sent` metadata to make the lab timeline visible. That is current
-instrumentation, not the recommended production default.
+The current POC follows this rule. It sends `llm.token` and `audio.chunk` only over the
+live browser WebSocket. Kafka receives LLM/TTS milestones and one aggregated
+`transport.audio_sent` event per response.
 
 ## Partitioning And Ordering
 
@@ -96,10 +96,31 @@ Avoid publishing the same logical event directly and through an outbox unless th
 contract explicitly defines deduplication. An unclear dual-write design can turn a
 normal retry into a duplicate-message incident.
 
-The current POC directly publishes an event and, for events marked critical, also
-inserts the same event into the outbox. Unique database keys reduce repeated persistence
-effects, but downstream Kafka consumers could still see two deliveries. Production
-work should choose a single route per event.
+The current boundary is explicit:
+
+- session lifecycle, pipeline, provider, and usage facts publish directly to Kafka;
+- the event worker consumes them and applies one idempotent Postgres transaction; and
+- `billing.usage_recorded`, which is atomically tied to a usage/billing DB projection,
+  is written to `outbox_events` and published by the outbox worker.
+
+The same logical billing event is not also directly published by the session worker.
+
+## Current Topics
+
+| Topic | Current data |
+|---|---|
+| `call-events` | call lifecycle and workflow state |
+| `pipeline-events` | VAD, STT/LLM/TTS milestones, backpressure, aggregated transport, duplicate/DB signals |
+| `provider-events` | provider failures and fallback selections |
+| `usage-events` | STT duration, LLM token usage, and TTS estimated usage |
+| `billing-events` | outbox-published billing rollup changes |
+| `outbox-events` | reserved topic; the active outbox rows currently target their owned business topic |
+| `dead-letter-events` | fallback for unmapped contracts |
+
+The local Compose cluster is one Apache Kafka 3.9.1 KRaft broker. Each application
+topic has three partitions and replication factor one, with data on the `kafka-data`
+volume. Kafka UI manages inspection at `http://localhost:8081`; `kafka-init` owns
+idempotent topic creation. This is useful locally but is not highly available.
 
 ## Schema Evolution
 

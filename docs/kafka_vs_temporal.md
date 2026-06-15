@@ -20,8 +20,8 @@ Partition by `call_id` to preserve per-call order. Consumers must be idempotent 
 delivery is at least once.
 
 Kafka should not carry every audio frame, STT partial, LLM token, or TTS chunk by
-default. The current POC emits token and chunk metadata for demo visibility; production
-should sample or aggregate that traffic.
+default. The current POC publishes coarse milestones and usage events; live deltas and
+audio remain on the WebSocket/in-memory path.
 
 ## Temporal: Durable Outer Loop
 
@@ -78,11 +78,10 @@ Examples:
 
 ## Current POC
 
-The current `CallWorkflow` starts at call admission and receives routine backpressure
-and provider-failure signals. That implementation demonstrates Temporal durability and
-worker restart, but it is intentionally broader than the recommended production role.
+The current `CallWorkflow` starts at call admission and receives high-level call and
+provider-failure signals. Routine cork/uncork remains inside `StreamModule` and is
+published to Kafka only for the reliability timeline.
 
-The production direction is to remove routine cork/uncork transitions from Temporal,
-keep provider failover decisions local when they must happen within a live latency
-budget, and use Temporal only when an outer-loop lifecycle action must survive process
-loss.
+The production direction is to start workflows only when an outer-loop lifecycle
+action must survive process loss. Provider failover remains local when it must happen
+within a live latency budget.
