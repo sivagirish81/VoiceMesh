@@ -109,17 +109,19 @@ class EventProjector:
                 models.get("tts"),
             )
         elif event.event_type == EventType.CALL_ENDED:
-            await connection.execute(
+            result = await connection.execute(
                 """
                 UPDATE calls SET status='CALL_COMPLETED', current_stage=$2,
                     final_summary=$3, ended_at=$4, updated_at=NOW()
-                WHERE call_id=$1
+                WHERE call_id=$1 AND status <> 'CALL_FAILED'
                 """,
                 event.call_id,
                 event.stage,
                 event.payload.get("final_response"),
                 event.timestamp,
             )
+            if result == "UPDATE 0":
+                return
             await self._update_call_billing(
                 connection,
                 event.call_id,
