@@ -10,16 +10,19 @@ from fastapi import WebSocketDisconnect
 from opentelemetry import trace
 
 from apps.api.config import Settings
-from apps.api.db.repository import PostgresRepository
 from apps.api.events.kafka_producer import KafkaEventProducer
 from apps.api.events.schemas import EventType, PipelineEvent
 from apps.api.pipeline.backpressure import BackpressureController
-from apps.api.pipeline.events import AudioFrame, FinalizedTurn, PipelineState
+from apps.api.pipeline.events import AudioFrame, PipelineState
 from apps.api.pipeline.stages.llm import generate_tokens
-from apps.api.pipeline.stages.stt import transcribe_turn
 from apps.api.pipeline.stages.tts import synthesize_audio
 from apps.api.pipeline.stages.vad import EnergyVADProvider, TurnDetector
-from apps.api.providers.base import LLMProvider, STTProvider, TTSProvider
+from apps.api.providers.base import (
+    LLMProvider,
+    StreamingSTTSession,
+    STTProvider,
+    TTSProvider,
+)
 from apps.api.telemetry.metrics import ACTIVE_CALLS, PROVIDER_FAILURES, STAGE_LATENCY
 from apps.api.telemetry.tracing import current_trace_id
 from apps.api.temporal_client import TemporalLifecycleClient
@@ -41,7 +44,6 @@ class StreamModule:
         llm: LLMProvider,
         tts: TTSProvider,
         producer: KafkaEventProducer,
-        repository: PostgresRepository,
         temporal: TemporalLifecycleClient,
     ) -> None:
         self.call_id = call_id
@@ -51,23 +53,22 @@ class StreamModule:
         self.llm = llm
         self.tts = tts
         self.producer = producer
-        self.repository = repository
         self.temporal = temporal
         self.state = PipelineState(call_id=call_id)
         self.vad = EnergyVADProvider(settings.vad_energy_threshold)
         self.turn_detector = TurnDetector(settings.vad_silence_ms)
-        self._audio_buffer = bytearray()
-        self._sample_rate = 16000
+        self._stt_session: StreamingSTTSession | None = None
+        self._turn_has_audio = False
+        self._turn_audio_bytes = 0
         self._turn_lock = asyncio.Lock()
         self._closed = False
+        self._call_started_at = time.monotonic()
 
     async def run(self) -> None:
         ACTIVE_CALLS.inc()
         await self.transport.accept()
         try:
-            await self.repository.create_call(
-                self.call_id, self.stt.name, self.llm.name, self.tts.name
-            )
+            self._stt_session = await self.stt.open_stream(self._on_stt_delta)
             await self.temporal.start_call(self.call_id)
             await self.emit(
                 EventType.CALL_STARTED,
@@ -78,9 +79,13 @@ class StreamModule:
                         "stt": self.stt.name,
                         "llm": self.llm.name,
                         "tts": self.tts.name,
+                    },
+                    "models": {
+                        "stt": self.stt.model,
+                        "llm": self.llm.model,
+                        "tts": self.tts.model,
                     }
                 },
-                critical=True,
             )
             await self.transport.send_json("call.started", call_id=self.call_id)
             async for message in self.transport.receive_messages():
@@ -100,12 +105,12 @@ class StreamModule:
                 await self._fail_call(str(exc))
         finally:
             await self._end_call()
+            if self._stt_session:
+                with suppress(Exception):
+                    await self._stt_session.close()
             ACTIVE_CALLS.dec()
 
     async def _handle_audio(self, frame: AudioFrame) -> None:
-        if len(self._audio_buffer) + len(frame.data) > self.settings.websocket_max_audio_bytes:
-            raise ValueError("Audio turn exceeded maximum size")
-        self._sample_rate = frame.sample_rate
         chunk_duration_ms = len(frame.data) / (2 * frame.sample_rate) * 1000
         with tracer.start_as_current_span("pipeline.vad") as span:
             speech = await self.vad.detect_speech(frame.data)
@@ -113,53 +118,55 @@ class StreamModule:
             span.set_attribute("speech", speech)
         started, ended = self.turn_detector.update(speech, chunk_duration_ms)
         if started:
-            self._audio_buffer.clear()
             self.state.turn_id = str(uuid4())
+            self._turn_has_audio = False
+            self._turn_audio_bytes = 0
             await self.emit(EventType.VAD_SPEECH_STARTED, "vad")
         if self.turn_detector.speaking or ended:
-            self._audio_buffer.extend(frame.data)
+            self._turn_audio_bytes += len(frame.data)
+            if self._turn_audio_bytes > self.settings.websocket_max_audio_bytes:
+                raise ValueError("Audio turn exceeded maximum size")
+            if not self._stt_session:
+                raise RuntimeError("Streaming STT session is not available")
+            self._turn_has_audio = True
+            await self._stt_session.append_audio(frame.data, frame.sample_rate)
         if ended:
             await self.emit(EventType.VAD_SPEECH_ENDED, "vad")
             await self._finalize_turn()
 
     async def _finalize_turn(self) -> None:
-        if not self._audio_buffer or self._turn_lock.locked():
+        if not self._turn_has_audio or self._turn_lock.locked():
             return
-        turn = FinalizedTurn(
-            turn_id=self.state.turn_id,
-            pcm_bytes=bytes(self._audio_buffer),
-            sample_rate=self._sample_rate,
-        )
-        self._audio_buffer.clear()
-        await self._process_turn(turn)
+        turn_id = self.state.turn_id
+        self._turn_has_audio = False
+        self._turn_audio_bytes = 0
+        await self._process_turn(turn_id)
 
-    async def _process_turn(self, turn: FinalizedTurn) -> None:
+    async def _process_turn(self, turn_id: str) -> None:
         async with self._turn_lock:
-            self.state.turn_id = turn.turn_id
-            transcript = await self._run_stt(turn)
+            self.state.turn_id = turn_id
+            transcript = await self._run_stt(turn_id)
             if not transcript.strip():
                 return
             self.state.transcript = transcript
             await self.transport.send_json(
-                "transcript.final", call_id=self.call_id, turn_id=turn.turn_id, text=transcript
+                "transcript.final", call_id=self.call_id, turn_id=turn_id, text=transcript
             )
             await self._run_llm_tts_transport(transcript)
 
-    async def _run_stt(self, turn: FinalizedTurn) -> str:
+    async def _run_stt(self, turn_id: str) -> str:
         self.state.current_stage = "stt"
         await self.emit(EventType.STT_STARTED, "stt")
         started = time.perf_counter()
         try:
             with tracer.start_as_current_span("pipeline.stt") as span:
                 span.set_attribute("call_id", self.call_id)
-                span.set_attribute("turn_id", turn.turn_id)
+                span.set_attribute("turn_id", turn_id)
                 span.set_attribute("provider", self.stt.name)
-                transcript = await transcribe_turn(
-                    self.stt,
-                    turn.pcm_bytes,
-                    turn.sample_rate,
-                    self.settings.turn_timeout_seconds,
-                )
+                if not self._stt_session:
+                    raise RuntimeError("Streaming STT session is not available")
+                async with asyncio.timeout(self.settings.turn_timeout_seconds):
+                    result = await self._stt_session.commit()
         except TimeoutError:
             await self.emit(EventType.PIPELINE_STAGE_TIMEOUT, "stt")
             raise
@@ -168,16 +175,43 @@ class StreamModule:
             raise
         latency = (time.perf_counter() - started) * 1000
         STAGE_LATENCY.labels("stt", self.stt.name).observe(latency)
-        await self.repository.record_metric(
-            self.call_id, turn.turn_id, "stt", latency, 0, self.state.corked, self.stt.name
-        )
         await self.emit(
             EventType.STT_FINAL_TRANSCRIPT,
             "stt",
-            payload={"transcript": transcript, "latency_ms": latency},
-            critical=True,
+            payload={
+                "transcript": result.transcript,
+                "latency_ms": latency,
+                "item_id": result.item_id,
+                "audio_seconds": result.audio_seconds,
+                "streaming": True,
+                "model": self.stt.model,
+            },
         )
-        return transcript
+        await self.emit(
+            EventType.USAGE_STT_RECORDED,
+            "stt",
+            payload={
+                "provider": self.stt.name,
+                "model": self.stt.model,
+                "measurements": [
+                    {
+                        "usage_type": "audio_minute",
+                        "quantity": result.audio_seconds / 60,
+                        "unit": "minute",
+                        "estimated": False,
+                    }
+                ],
+            },
+        )
+        return result.transcript
+
+    async def _on_stt_delta(self, delta: str) -> None:
+        await self.transport.send_json(
+            "transcript.partial",
+            call_id=self.call_id,
+            turn_id=self.state.turn_id,
+            delta=delta,
+        )
 
     async def _run_llm_tts_transport(self, transcript: str) -> None:
         token_queue: BackpressureController[str | None] = BackpressureController(
@@ -225,11 +259,7 @@ class StreamModule:
                     response_parts.append(token)
                     await queue.put(token)
                     self._set_queue_depth("llm_to_tts", queue.depth)
-                    await self.emit(
-                        EventType.LLM_TOKEN,
-                        "llm",
-                        payload={"token": token, "queue_depth": queue.depth},
-                    )
+                    await self._send_pipeline_state()
                     await self.transport.send_json("llm.token", text=token)
         except Exception as exc:
             await self._provider_failed("llm", self.llm.name, exc)
@@ -240,20 +270,39 @@ class StreamModule:
         self.state.response = response
         latency = (time.perf_counter() - started) * 1000
         STAGE_LATENCY.labels("llm", self.llm.name).observe(latency)
-        await self.repository.record_metric(
-            self.call_id,
-            self.state.turn_id,
-            "llm",
-            latency,
-            queue.depth,
-            self.state.corked,
-            self.llm.name,
-        )
         await self.emit(
             EventType.LLM_FINAL_RESPONSE,
             "llm",
             payload={"response": response, "latency_ms": latency},
-            critical=True,
+        )
+        usage = self.llm.consume_usage()
+        await self.emit(
+            EventType.USAGE_LLM_RECORDED,
+            "llm",
+            payload={
+                "provider": self.llm.name,
+                "model": self.llm.model,
+                "measurements": [
+                    {
+                        "usage_type": "input_token",
+                        "quantity": max(0, usage.input_tokens - usage.cached_input_tokens),
+                        "unit": "token",
+                        "estimated": False,
+                    },
+                    {
+                        "usage_type": "cached_input_token",
+                        "quantity": usage.cached_input_tokens,
+                        "unit": "token",
+                        "estimated": False,
+                    },
+                    {
+                        "usage_type": "output_token",
+                        "quantity": usage.output_tokens,
+                        "unit": "token",
+                        "estimated": False,
+                    },
+                ],
+            },
         )
 
     async def _consume_tts(
@@ -271,6 +320,7 @@ class StreamModule:
                 token = await token_queue.get()
                 token_queue.task_done()
                 self._set_queue_depth("llm_to_tts", token_queue.depth)
+                await self._send_pipeline_state()
                 if token is None:
                     if buffer.strip():
                         first_audio = await self._synthesize_phrase(
@@ -288,14 +338,10 @@ class StreamModule:
             await audio_queue.put(None)
         latency = (time.perf_counter() - started) * 1000
         STAGE_LATENCY.labels("tts", self.tts.name).observe(latency)
-        await self.repository.record_metric(
-            self.call_id,
-            self.state.turn_id,
+        await self.emit(
+            EventType.TTS_COMPLETED,
             "tts",
-            latency,
-            audio_queue.depth,
-            self.state.corked,
-            self.tts.name,
+            payload={"latency_ms": latency, "queue_depth": audio_queue.depth},
         )
 
     async def _synthesize_phrase(
@@ -311,29 +357,55 @@ class StreamModule:
                     await self.emit(EventType.TTS_FIRST_AUDIO, "tts")
                 await audio_queue.put(audio)
                 self._set_queue_depth("tts_to_transport", audio_queue.depth)
-                await self.emit(
-                    EventType.TTS_AUDIO_CHUNK,
-                    "tts",
-                    payload={"bytes": len(audio), "queue_depth": audio_queue.depth},
-                )
+                await self._send_pipeline_state()
+        usage = self.tts.consume_usage()
+        await self.emit(
+            EventType.USAGE_TTS_RECORDED,
+            "tts",
+            payload={
+                "provider": self.tts.name,
+                "model": self.tts.model,
+                "audio_seconds": usage.output_audio_seconds,
+                "audio_bytes": usage.output_audio_bytes,
+                "measurements": [
+                    {
+                        "usage_type": "input_text_token",
+                        "quantity": max(1, (len(usage.input_text) + 3) // 4),
+                        "unit": "token",
+                        "estimated": True,
+                    },
+                    {
+                        "usage_type": "output_audio_token",
+                        "quantity": round(usage.output_audio_seconds * 20),
+                        "unit": "token",
+                        "estimated": True,
+                    },
+                ],
+            },
+        )
         return first_audio
 
     async def _consume_transport(
         self, audio_queue: BackpressureController[bytes | None]
     ) -> None:
         self.state.current_stage = "transport"
+        bytes_sent = 0
+        chunks_sent = 0
         while True:
             audio = await audio_queue.get()
             audio_queue.task_done()
             self._set_queue_depth("tts_to_transport", audio_queue.depth)
+            await self._send_pipeline_state()
             if audio is None:
+                await self.emit(
+                    EventType.TRANSPORT_AUDIO_SENT,
+                    "transport",
+                    payload={"bytes": bytes_sent, "chunks": chunks_sent, "queue_depth": 0},
+                )
                 return
             await self.transport.send_audio(audio)
-            await self.emit(
-                EventType.TRANSPORT_AUDIO_SENT,
-                "transport",
-                payload={"bytes": len(audio), "queue_depth": audio_queue.depth},
-            )
+            bytes_sent += len(audio)
+            chunks_sent += 1
 
     async def _on_backpressure(self, corked: bool, reason: str, depth: int) -> None:
         self.state.corked = corked
@@ -343,15 +415,6 @@ class StreamModule:
             event_type,
             "backpressure",
             payload={"reason": reason, "queue_depth": depth},
-            critical=True,
-        )
-        await self.repository.update_call_state(
-            self.call_id, corked=corked, cork_reason=reason if corked else None
-        )
-        await self.temporal.signal(
-            self.call_id,
-            "pipeline_event",
-            {"event_type": str(event_type), "reason": reason},
         )
         await self.transport.send_json(
             str(event_type), corked=corked, reason=reason, queue_depths=self.state.queue_depths
@@ -360,13 +423,23 @@ class StreamModule:
     def _set_queue_depth(self, stage: str, depth: int) -> None:
         self.state.queue_depths[stage] = depth
 
+    async def _send_pipeline_state(self) -> None:
+        await self.transport.send_json(
+            "pipeline.state",
+            state={
+                "stage": self.state.current_stage,
+                "corked": self.state.corked,
+                "cork_reason": self.state.cork_reason,
+                "queue_depths": self.state.queue_depths,
+            },
+        )
+
     async def _provider_failed(self, stage: str, provider: str, exc: Exception) -> None:
         PROVIDER_FAILURES.labels(provider, stage).inc()
         await self.emit(
             EventType.PROVIDER_FAILED,
             stage,
             payload={"provider": provider, "error": str(exc)},
-            critical=True,
         )
         await self.temporal.signal(
             self.call_id,
@@ -381,7 +454,6 @@ class StreamModule:
         *,
         turn_id: str | None = None,
         payload: dict[str, Any] | None = None,
-        critical: bool = False,
     ) -> PipelineEvent:
         self.state.sequence_number += 1
         event = PipelineEvent.create(
@@ -394,44 +466,6 @@ class StreamModule:
             trace_id=current_trace_id(),
         )
         await self.producer.publish(event)
-        inserted = await self.repository.persist_event(event, critical=critical)
-        if inserted is False:
-            duplicate = PipelineEvent.create(
-                call_id=self.call_id,
-                turn_id=event.turn_id,
-                event_type=EventType.DUPLICATE_EVENT_IGNORED,
-                stage="idempotency",
-                sequence_number=self.state.sequence_number + 1,
-                payload={"duplicate_idempotency_key": event.idempotency_key},
-            )
-            self.state.sequence_number += 1
-            await self.producer.publish(duplicate)
-        elif inserted is None:
-            self.state.sequence_number += 1
-            db_failure = PipelineEvent.create(
-                call_id=self.call_id,
-                turn_id=event.turn_id,
-                event_type=EventType.POSTGRES_WRITE_FAILED,
-                stage="postgres",
-                sequence_number=self.state.sequence_number,
-                payload={
-                    "failed_event_type": str(event.event_type),
-                    "idempotency_key": event.idempotency_key,
-                },
-                trace_id=current_trace_id(),
-            )
-            await self.producer.publish(db_failure)
-            await self.transport.send_json(
-                "pipeline.event",
-                event=db_failure.model_dump(mode="json"),
-                state={
-                    "stage": stage,
-                    "corked": self.state.corked,
-                    "cork_reason": self.state.cork_reason,
-                    "queue_depths": self.state.queue_depths,
-                },
-            )
-        await self.repository.update_call_state(self.call_id, stage=stage)
         await self.transport.send_json(
             "pipeline.event",
             event=event.model_dump(mode="json"),
@@ -450,10 +484,6 @@ class StreamModule:
             self.state.current_stage,
             turn_id="session",
             payload={"error": error},
-            critical=True,
-        )
-        await self.repository.update_call_state(
-            self.call_id, status="CALL_FAILED", error=error, ended=True
         )
         await self.temporal.signal(self.call_id, "call_failed", {"error": error})
         await self.transport.send_json("error", message=error)
@@ -467,14 +497,10 @@ class StreamModule:
                 EventType.CALL_ENDED,
                 "transport",
                 turn_id="session",
-                payload={"final_response": self.state.response},
-                critical=True,
-            )
-            await self.repository.update_call_state(
-                self.call_id,
-                status="CALL_COMPLETED",
-                final_summary=self.state.response,
-                ended=True,
+                payload={
+                    "final_response": self.state.response,
+                    "duration_seconds": time.monotonic() - self._call_started_at,
+                },
             )
             await self.temporal.signal(
                 self.call_id,

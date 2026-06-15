@@ -1,12 +1,11 @@
 from typing import Any, cast
-from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from apps.api.db.repository import PostgresRepository
 from apps.api.events.kafka_producer import KafkaEventProducer
-from apps.api.events.schemas import EventType, PipelineEvent
+from apps.api.events.schemas import PipelineEvent
 from apps.api.failure_injection.injector import FailureInjector
 
 router = APIRouter(prefix="/demo", tags=["demo"])
@@ -57,23 +56,10 @@ async def replay_duplicate_events(call_id: str, request: Request) -> dict[str, A
         payload=source["payload"],
         trace_id=source["trace_id"],
     )
-    inserted = await repository.persist_event(replay)
-    ignored = not inserted
-    if ignored:
-        duplicate_event = PipelineEvent.create(
-            call_id=call_id,
-            turn_id=replay.turn_id,
-            event_type=EventType.DUPLICATE_EVENT_IGNORED,
-            stage="idempotency",
-            sequence_number=replay.sequence_number + 1,
-            idempotency_key=f"{call_id}:duplicate-demo:{uuid4()}",
-            payload={"replayed_idempotency_key": replay.idempotency_key},
-        )
-        await repository.persist_event(duplicate_event)
-        await producer.publish(duplicate_event)
+    await producer.publish(replay)
     return {
         "call_id": call_id,
-        "duplicate_ignored": ignored,
+        "duplicate_replay_queued": True,
         "idempotency_key": replay.idempotency_key,
     }
 

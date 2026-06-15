@@ -39,3 +39,9 @@ def test_sequence_number_must_be_positive() -> None:
             sequence_number=0,
         )
 
+
+def test_usage_and_billing_events_have_dedicated_topics() -> None:
+    assert topic_for_event(EventType.USAGE_STT_RECORDED) == "usage-events"
+    assert topic_for_event(EventType.USAGE_LLM_RECORDED) == "usage-events"
+    assert topic_for_event(EventType.USAGE_TTS_RECORDED) == "usage-events"
+    assert topic_for_event(EventType.BILLING_USAGE_RECORDED) == "billing-events"

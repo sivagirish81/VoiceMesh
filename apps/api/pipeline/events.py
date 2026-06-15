@@ -10,13 +10,6 @@ class AudioFrame:
 
 
 @dataclass(slots=True)
-class FinalizedTurn:
-    turn_id: str
-    pcm_bytes: bytes
-    sample_rate: int
-
-
-@dataclass(slots=True)
 class PipelineState:
     call_id: str
     current_stage: str = "transport"
@@ -28,4 +21,3 @@ class PipelineState:
     turn_id: str = "session"
     sequence_number: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
-

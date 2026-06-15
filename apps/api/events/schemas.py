@@ -21,6 +21,7 @@ class EventType(StrEnum):
     TTS_STARTED = "tts.started"
     TTS_FIRST_AUDIO = "tts.first_audio"
     TTS_AUDIO_CHUNK = "tts.audio_chunk"
+    TTS_COMPLETED = "tts.completed"
     TRANSPORT_AUDIO_SENT = "transport.audio_sent"
     PIPELINE_CORKED = "pipeline.corked"
     PIPELINE_UNCORKED = "pipeline.uncorked"
@@ -31,6 +32,10 @@ class EventType(StrEnum):
     POSTGRES_WRITE_FAILED = "postgres.write_failed"
     POSTGRES_RECOVERED = "postgres.recovered"
     WORKFLOW_STATE_CHANGED = "workflow.state_changed"
+    USAGE_STT_RECORDED = "usage.stt"
+    USAGE_LLM_RECORDED = "usage.llm"
+    USAGE_TTS_RECORDED = "usage.tts"
+    BILLING_USAGE_RECORDED = "billing.usage_recorded"
 
 
 class PipelineEvent(BaseModel):
@@ -83,6 +88,8 @@ TOPIC_BY_EVENT_PREFIX = {
     "duplicate_event.": "pipeline-events",
     "postgres.": "pipeline-events",
     "workflow.": "call-events",
+    "usage.": "usage-events",
+    "billing.": "billing-events",
 }
 
 
@@ -92,4 +99,3 @@ def topic_for_event(event_type: EventType) -> str:
         if value.startswith(prefix):
             return topic
     return "dead-letter-events"
-

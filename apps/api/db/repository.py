@@ -63,8 +63,10 @@ class PostgresRepository:
                 last_error = exc
                 DB_WRITE_FAILURES.inc()
                 logger.warning(
-                    "postgres write failed",
-                    extra={"attempt": attempt + 1, "critical": critical, "error": str(exc)},
+                    "postgres write failed: attempt=%s critical=%s error=%s",
+                    attempt + 1,
+                    critical,
+                    exc,
                 )
                 await asyncio.sleep(0.1 * (2**attempt))
         if critical and last_error:
@@ -262,6 +264,73 @@ class PostgresRepository:
             ),
         )
 
+    async def billing_summary(self) -> dict[str, Any]:
+        pool = self._require_pool()
+        totals = await pool.fetchrow(
+            """
+            SELECT
+                COUNT(*) AS calls,
+                COALESCE(SUM(call_duration_seconds), 0) AS duration_seconds,
+                COALESCE(SUM(provider_cost_usd), 0) AS provider_cost_usd,
+                COALESCE(SUM(platform_fee_usd), 0) AS platform_fee_usd,
+                COALESCE(SUM(total_cost_usd), 0) AS total_cost_usd
+            FROM call_billing
+            """
+        )
+        stages = await pool.fetch(
+            """
+            SELECT stage, provider, model, usage_type, unit,
+                SUM(quantity) AS quantity,
+                SUM(cost_usd) AS cost_usd,
+                BOOL_OR(estimated) AS has_estimates
+            FROM usage_records
+            GROUP BY stage, provider, model, usage_type, unit
+            ORDER BY stage, usage_type
+            """
+        )
+        return {
+            "totals": dict(totals) if totals else {},
+            "usage": [dict(row) for row in stages],
+        }
+
+    async def list_billing_calls(self, limit: int = 100) -> list[dict[str, Any]]:
+        rows = await self._require_pool().fetch(
+            """
+            SELECT b.*, c.status AS call_status, c.started_at, c.ended_at,
+                c.selected_stt_model, c.selected_llm_model, c.selected_tts_model
+            FROM call_billing b
+            LEFT JOIN calls c USING (call_id)
+            ORDER BY b.updated_at DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+        return [dict(row) for row in rows]
+
+    async def get_call_billing(self, call_id: str) -> dict[str, Any] | None:
+        pool = self._require_pool()
+        billing = await pool.fetchrow(
+            """
+            SELECT b.*, c.status AS call_status, c.started_at, c.ended_at,
+                c.selected_stt_model, c.selected_llm_model, c.selected_tts_model
+            FROM call_billing b
+            LEFT JOIN calls c USING (call_id)
+            WHERE b.call_id=$1
+            """,
+            call_id,
+        )
+        if not billing:
+            return None
+        usage = await pool.fetch(
+            """
+            SELECT * FROM usage_records
+            WHERE call_id=$1
+            ORDER BY created_at, id
+            """,
+            call_id,
+        )
+        return {"billing": dict(billing), "usage": [dict(row) for row in usage]}
+
     async def health(self) -> bool:
         try:
             return bool(await self._require_pool().fetchval("SELECT TRUE"))
@@ -270,5 +339,8 @@ class PostgresRepository:
 
     async def reset_demo(self) -> None:
         await self._require_pool().execute(
-            "TRUNCATE call_events, idempotency_keys, outbox_events, pipeline_metrics, calls"
+            """
+            TRUNCATE usage_records, call_billing, call_events, idempotency_keys,
+                outbox_events, pipeline_metrics, calls
+            """
         )

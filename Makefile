@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: up down restart logs api worker dashboard migrate create-topics \
+.PHONY: up down restart logs api worker event-worker dashboard migrate create-topics \
 	demo-normal-call demo-tts-backpressure demo-db-down demo-duplicate-events \
 	demo-kill-worker smoke-live-pipeline test lint
 
@@ -22,6 +22,9 @@ api:
 
 worker:
 	python -m apps.worker.temporal_worker
+
+event-worker:
+	python -m apps.worker.event_worker
 
 dashboard:
 	cd apps/dashboard && npm run dev
