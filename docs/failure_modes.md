@@ -1,50 +1,99 @@
 # Failure Modes
 
-## STT Slow
+The session worker handles failures that affect live conversational latency. Kafka,
+Postgres consumers, and optional Temporal workflows handle durable follow-up without
+sitting between provider stages.
 
-The turn remains finalized while the STT provider call is bounded by
-`TURN_TIMEOUT_SECONDS`. Latency is traced and persisted. A timeout emits
-`pipeline.stage_timeout`; a provider exception emits `provider.failed` and signals
-Temporal.
+## STT Slow Or Unavailable
+
+A streaming STT adapter should expose partial progress, finalization latency, timeout,
+and a cancellable stream. The session worker may extend endpointing within a bounded
+budget, choose a preconfigured fallback, or fail the turn. It emits a coarse
+`provider.timeout` or `provider.error` event asynchronously.
+
+The POC instead finalizes a PCM turn, creates WAV, and performs one bounded OpenAI
+transcription call. A timeout emits `pipeline.stage_timeout`.
 
 ## LLM Slow
 
-Time to first token and total generation latency remain visible. Slow generation does
-not grow the downstream queue, but it increases turn latency and can trigger the
-overall turn timeout.
+Track time to first token separately from total generation. Slow first-token latency
+directly affects the conversational pause. A slow token stream may starve TTS rather
+than fill a queue. The session worker can cancel, fail over, or produce a bounded
+recovery utterance according to policy.
 
 ## TTS Slow
 
-LLM token production and TTS consumption are concurrent. Injected TTS delay grows the
-token queue, crosses the high watermark, corks the pipeline, and eventually blocks the
-producer without dropping critical text.
+When LLM output outpaces phrase synthesis, the token/phrase queue grows. At the high
+watermark the session runtime corks upstream production; at capacity, bounded `put`
+operations pause. Low-watermark drainage uncorks the stream.
+
+This state is in memory. A prolonged incident may emit a Kafka event, but routine
+cork/uncork transitions do not require Temporal.
 
 ## Transport Overloaded
 
-The TTS-to-transport audio queue is bounded. When browser/network sends slow down, TTS
-audio production pauses at queue capacity. Low-watermark drainage uncorks the pipeline.
+Slow network or client playback grows the audio queue. TTS production pauses at queue
+capacity. If send lag exceeds the conversational budget, the worker should cancel the
+response, discard stale audio, or end the call rather than accumulating unbounded
+latency.
+
+## Barge-In And Late Provider Output
+
+User speech during agent playback cancels the active response. The worker stops
+playback, cancels or ignores LLM/TTS, drains old queues, and advances `turn_id` and
+`response_id`. Late chunks are rejected by the response fence and counted.
+
+The POC does not yet implement full-duplex barge-in or stale-response fencing.
 
 ## Duplicate Events
 
-Every persisted event has a unique idempotency key. A replay cannot insert a second
-event or produce a second state transition. The system emits a new
-`duplicate_event.ignored` observation for operator visibility.
+Kafka and outbox delivery are at least once. Consumers use deterministic idempotency
+keys in the same transaction as their state change. A duplicate should produce no
+second billing record, webhook state transition, call event, or outbox row.
+
+The POC duplicate replay demonstrates Postgres key enforcement. Its current direct plus
+outbox publication path can still create duplicate Kafka deliveries, which is why
+consumer idempotency remains mandatory.
 
 ## Database Unavailable
 
-Writes retry three times with exponential backoff. Kafka and in-memory media processing
-continue where the failed write is non-critical. The outbox resumes polling after the
-database returns. Exhausted non-critical writes are not reconstructed automatically.
+The target design keeps the live provider chain independent of synchronous writes.
+Kafka retains coarse events while Postgres writers retry, pause, or reconcile after
+recovery. Configuration cache misses and new call admission may fail closed according
+to tenant policy.
+
+The POC performs bounded synchronous repository calls from `StreamModule`. Audio can
+continue after non-critical failures, but retries consume live latency and exhausted
+writes are not automatically reconstructed.
 
 ## Temporal Worker Crash
 
-Workflow history remains in Temporal server storage. Signals and tasks wait while the
-worker is absent. Restarting the worker replays deterministic history and resumes from
-the durable state.
+An outer-loop workflow remains durable in Temporal server storage. Workflow and activity
+tasks wait while the worker is unavailable and resume after restart.
+
+An active media session does not move into Temporal. A worker crash cannot reconstruct
+browser audio buffers, provider sockets, or playback position. The POC worker-crash demo
+proves durable workflow history, not seamless live-media failover.
 
 ## Kafka Consumer Lag
 
-Pipeline production remains decoupled from consumers until broker retention or disk
-limits become relevant. Kafka UI exposes offsets. Production hardening would add
-consumer-lag metrics, autoscaling, retention alarms, and dead-letter replay tooling.
+Lag delays persistence, billing, analytics, webhook dispatch, and workflow starts, but
+should not delay an active in-memory turn. Monitor lag by consumer group and partition,
+scale consumers, enforce retention headroom, and provide dead-letter/replay tooling.
 
+## Kafka Producer Failure
+
+The session runtime should use a bounded non-blocking publication strategy. Critical
+business facts may require a local durable handoff or outbox, while telemetry can be
+dropped or sampled under pressure. Blocking every token or audio chunk on broker
+acknowledgement is not acceptable.
+
+The POC currently awaits Kafka publication for each event, including fine-grained
+events, so broker latency can enter the hot path.
+
+## Webhook Failure
+
+End-of-call webhook delivery is asynchronous. Persist the attempt, sign the request,
+retry with backoff and jitter, honor idempotency, and expose terminal failure to the
+tenant. Temporal is appropriate when the retry schedule or surrounding workflow is
+long-running; a durable idempotent worker may be enough for simpler delivery.
