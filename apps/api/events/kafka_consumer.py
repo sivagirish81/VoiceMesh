@@ -39,6 +39,6 @@ class KafkaEventConsumer:
                         await self._consumer.commit()
                     except Exception:
                         logger.exception("Kafka event handling failed")
+                        raise
         finally:
             await self._consumer.stop()
-

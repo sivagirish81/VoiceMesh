@@ -21,6 +21,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
               <Link href="/demo">Live Demo</Link>
               <Link href="/calls">Calls</Link>
               <Link href="/metrics">Metrics</Link>
+              <Link href="/billing">Billing</Link>
               <a href="http://localhost:8080" target="_blank">Temporal</a>
               <a href="http://localhost:16686" target="_blank">Jaeger</a>
             </div>
@@ -31,4 +32,3 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
     </html>
   );
 }
-

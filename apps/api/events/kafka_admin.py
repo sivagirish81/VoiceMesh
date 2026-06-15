@@ -8,6 +8,8 @@ TOPICS = [
     "pipeline-events",
     "provider-events",
     "outbox-events",
+    "usage-events",
+    "billing-events",
     "dead-letter-events",
 ]
 
@@ -27,4 +29,3 @@ async def create_topics(bootstrap_servers: str) -> None:
 
 def main(bootstrap_servers: str) -> None:
     asyncio.run(create_topics(bootstrap_servers))
-

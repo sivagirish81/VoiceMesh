@@ -26,6 +26,7 @@ export default function DemoPage() {
   const [callId, setCallId] = useState("");
   const [connected, setConnected] = useState(false);
   const [recording, setRecording] = useState(false);
+  const [partialTranscript, setPartialTranscript] = useState("");
   const [transcript, setTranscript] = useState("");
   const [response, setResponse] = useState("");
   const [events, setEvents] = useState<PipelineEvent[]>([]);
@@ -60,6 +61,7 @@ export default function DemoPage() {
     const id = crypto.randomUUID();
     setCallId(id);
     setEvents([]);
+    setPartialTranscript("");
     setTranscript("");
     setResponse("");
     const socket = new WebSocket(`${WS_URL}/ws/calls/${id}`);
@@ -88,13 +90,20 @@ export default function DemoPage() {
     };
     socket.onmessage = (message) => {
       const data = JSON.parse(message.data);
-      if (data.type === "transcript.final") setTranscript(data.text);
+      if (data.type === "transcript.partial") {
+        setPartialTranscript((current) => current + data.delta);
+      }
+      if (data.type === "transcript.final") {
+        setTranscript(data.text);
+        setPartialTranscript("");
+      }
       if (data.type === "llm.token") setResponse((current) => current + data.text);
       if (data.type === "audio.chunk") playPcm(data.audio, data.sample_rate);
       if (data.type === "pipeline.event") {
         setEvents((current) => [...current.slice(-199), data.event]);
         setPipeline(data.state);
       }
+      if (data.type === "pipeline.state") setPipeline(data.state);
       if (data.type === "pipeline.corked" || data.type === "pipeline.uncorked") {
         setPipeline((current) => ({
           ...current,
@@ -146,8 +155,10 @@ export default function DemoPage() {
       </div>
       <div className="grid two">
         <div className="card">
-          <h3>Final transcript</h3>
-          <div className="transcript">{transcript || "Speak naturally; silence closes the turn."}</div>
+          <h3>Streaming transcript</h3>
+          <div className="transcript">
+            {partialTranscript || transcript || "Speak naturally; partial text appears before silence closes the turn."}
+          </div>
         </div>
         <div className="card">
           <h3>Streaming response</h3>
@@ -160,4 +171,3 @@ export default function DemoPage() {
     </div>
   );
 }
-

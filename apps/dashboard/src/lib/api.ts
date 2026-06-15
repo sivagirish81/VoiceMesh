@@ -28,6 +28,19 @@ export type PipelineEvent = {
   trace_id?: string;
 };
 
+export type BillingCall = {
+  call_id: string;
+  call_duration_seconds: string | number;
+  provider_cost_usd: string | number;
+  platform_fee_usd: string | number;
+  total_cost_usd: string | number;
+  currency: string;
+  status: string;
+  call_status?: string;
+  pricing_version: string;
+  updated_at: string;
+};
+
 export async function fetchJson<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
     ...options,

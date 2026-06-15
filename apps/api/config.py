@@ -13,7 +13,9 @@ class Settings(BaseSettings):
     stt_provider: str = "openai"
     llm_provider: str = "openai"
     tts_provider: str = "openai"
-    openai_stt_model: str = "gpt-4o-transcribe"
+    openai_stt_model: str = "gpt-realtime-whisper"
+    openai_stt_language: str | None = "en"
+    openai_stt_delay: str = "low"
     openai_llm_model: str = "gpt-4.1-mini"
     openai_tts_model: str = "gpt-4o-mini-tts"
     openai_tts_voice: str = "alloy"
@@ -27,6 +29,8 @@ class Settings(BaseSettings):
     temporal_namespace: str = "default"
     temporal_task_queue: str = "voicemesh-calls"
     otel_exporter_otlp_endpoint: str = "http://localhost:4317"
+    billing_platform_rate_per_minute_usd: float = Field(default=0.05, ge=0)
+    billing_pricing_version: str = "openai-2026-06-15+voicemesh-lab-v1"
 
     backpressure_high_watermark: int = Field(default=10, ge=2)
     backpressure_low_watermark: int = Field(default=3, ge=0)
@@ -61,4 +65,3 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-

@@ -19,7 +19,11 @@ class ProviderRegistry:
     def stt(self) -> STTProvider:
         if self._settings.stt_provider == "openai":
             return OpenAISTTProvider(
-                self._api_key(), self._settings.openai_stt_model, self._failure_injector
+                self._api_key(),
+                self._settings.openai_stt_model,
+                self._failure_injector,
+                language=self._settings.openai_stt_language,
+                delay=self._settings.openai_stt_delay,
             )
         raise ValueError(f"Unknown STT provider: {self._settings.stt_provider}")
 
@@ -39,4 +43,3 @@ class ProviderRegistry:
                 self._failure_injector,
             )
         raise ValueError(f"Unknown TTS provider: {self._settings.tts_provider}")
-

@@ -62,7 +62,7 @@ services:
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
-        for topic in call-events pipeline-events provider-events outbox-events dead-letter-events; do
+        for topic in call-events pipeline-events provider-events outbox-events usage-events billing-events dead-letter-events; do
           /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic "$$topic" --partitions 3 --replication-factor 1
         done
 
@@ -186,6 +186,20 @@ services:
         condition: service_completed_successfully
       temporal:
         condition: service_healthy
+
+  event-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    <<: *app-env
+    command: ["python", "-m", "apps.worker.event_worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
 
   dashboard:
     build:

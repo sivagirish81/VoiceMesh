@@ -55,16 +55,19 @@ async def main() -> None:
 
         async def observe(message: dict[str, Any]) -> None:
             nonlocal corked_at, last_depth, recovery_task, recovery_triggered
+            if message.get("type") == "pipeline.state":
+                depth = message["state"].get("queue_depths", {}).get("llm_to_tts")
+                if isinstance(depth, int) and depth != last_depth:
+                    last_depth = depth
+                    print(f"QUEUE: llm_to_tts depth={depth}")
+                return
             if message.get("type") != "pipeline.event":
                 return
             event = message["event"]
             event_type = event["event_type"]
             payload = event.get("payload", {})
             depth = payload.get("queue_depth")
-            if event_type == "llm.token" and isinstance(depth, int) and depth != last_depth:
-                last_depth = depth
-                print(f"QUEUE: llm_to_tts depth={depth}")
-            elif event_type == "pipeline.corked":
+            if event_type == "pipeline.corked":
                 corked_at = time.monotonic()
                 print(f"CORKED: {payload['reason']}")
                 if not recovery_triggered:

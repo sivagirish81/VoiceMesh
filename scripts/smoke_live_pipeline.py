@@ -40,6 +40,7 @@ async def run_smoke(
     call_id = f"smoke-{uuid4()}"
     input_audio = await generate_spoken_prompt(prompt)
     transcript = ""
+    partial_transcript_parts: list[str] = []
     response_parts: list[str] = []
     output_audio_bytes = 0
     observed_events: set[str] = set()
@@ -64,7 +65,9 @@ async def run_smoke(
             async for raw_message in ws:
                 message = json.loads(raw_message)
                 message_type = message.get("type")
-                if message_type == "transcript.final":
+                if message_type == "transcript.partial":
+                    partial_transcript_parts.append(message["delta"])
+                elif message_type == "transcript.final":
                     transcript = message["text"]
                 elif message_type == "llm.token":
                     response_parts.append(message["text"])
@@ -103,6 +106,8 @@ async def run_smoke(
     missing_events = required_events - observed_events
     if not transcript:
         raise RuntimeError("Live smoke test did not receive a final transcript")
+    if not partial_transcript_parts:
+        raise RuntimeError("Live smoke test did not receive streaming transcript deltas")
     if not response_parts:
         raise RuntimeError("Live smoke test did not receive streamed LLM tokens")
     if output_audio_bytes == 0:
@@ -111,12 +116,33 @@ async def run_smoke(
         raise RuntimeError(f"Live smoke test missed pipeline events: {sorted(missing_events)}")
 
     async with httpx.AsyncClient(base_url=api_url, timeout=10) as client:
-        call_response = await client.get(f"/calls/{call_id}")
-        call_response.raise_for_status()
-        persisted_call = call_response.json()
-        metrics_response = await client.get(f"/calls/{call_id}/metrics")
-        metrics_response.raise_for_status()
-        metrics = metrics_response.json()
+        persisted_call: dict[str, Any] | None = None
+        metrics: list[dict[str, Any]] = []
+        billing: dict[str, Any] | None = None
+        for _ in range(60):
+            call_response = await client.get(f"/calls/{call_id}")
+            billing_response = await client.get(f"/billing/calls/{call_id}")
+            if call_response.is_success:
+                persisted_call = call_response.json()
+            if persisted_call:
+                metrics_response = await client.get(f"/calls/{call_id}/metrics")
+                if metrics_response.is_success:
+                    metrics = metrics_response.json()
+            if billing_response.is_success:
+                billing = billing_response.json()
+            if (
+                persisted_call
+                and persisted_call["status"] == "CALL_COMPLETED"
+                and metrics
+                and billing
+                and billing["usage"]
+            ):
+                break
+            await asyncio.sleep(0.5)
+        if not persisted_call:
+            raise RuntimeError("Call projection was not persisted by the Kafka event worker")
+        if not billing:
+            raise RuntimeError("Billing projection was not persisted by the Kafka event worker")
 
     stage_latencies_ms: dict[str, list[float]] = {}
     for metric in metrics:
@@ -125,6 +151,7 @@ async def run_smoke(
     return {
         "call_id": call_id,
         "transcript": transcript,
+        "partial_transcript": "".join(partial_transcript_parts),
         "response": "".join(response_parts),
         "output_audio_bytes": output_audio_bytes,
         "observed_event_count": len(observed_events),
@@ -134,6 +161,8 @@ async def run_smoke(
         "uncork_count": uncork_count,
         "trace_id": trace_id,
         "stage_latencies_ms": stage_latencies_ms,
+        "billing": billing["billing"],
+        "usage_record_count": len(billing["usage"]),
     }
 
 
