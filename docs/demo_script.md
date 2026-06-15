@@ -9,11 +9,8 @@ Open `http://localhost:3000/demo`. Start the microphone and say:
 
 > Explain why backpressure matters in a live voice pipeline.
 
-Pause. Point out real PCM capture, RMS VAD, a finalized OpenAI STT transcript, streaming
-OpenAI LLM output, phrase-level OpenAI TTS, and browser playback.
-
-Be precise: the POC buffers one user turn before STT. Production direction is a
-long-lived streaming STT adapter that receives frames continuously.
+Pause. Point out real PCM capture, RMS VAD, OpenAI Realtime STT deltas before the final
+turn, streaming OpenAI LLM output, phrase-level OpenAI TTS, and browser playback.
 
 ## 0:35-1:00 - Runtime And Observability
 
@@ -23,8 +20,9 @@ Explain:
 
 - the live handoff is in memory inside `StreamModule`;
 - Kafka, Postgres, and Temporal are adjacent;
-- the POC emits unusually fine-grained Kafka events for lab visibility; and
-- production would retain coarse milestones and metrics, not every token/chunk.
+- Kafka carries coarse milestones and usage, not raw frames, LLM tokens, or TTS chunks;
+- the event worker projects those facts into Postgres outside the hot path; and
+- the billing page shows the provider-cost and platform-fee rollup.
 
 ## 1:00-1:35 - TTS Backpressure
 
@@ -51,9 +49,8 @@ make demo-duplicate-events
 ```
 
 Show `duplicate_event.ignored` on the call page. Explain that at-least-once systems need
-idempotent consumers and deterministic keys. Also state the current limitation: the POC
-can publish a critical event directly and through its outbox, so a production version
-must establish one authoritative path per logical event.
+idempotent consumers and deterministic keys. Point out that session facts publish
+directly, while DB-derived billing facts use the outbox as their authoritative route.
 
 ## 1:55-2:25 - Postgres Failure
 
@@ -63,10 +60,8 @@ Run:
 make demo-db-down
 ```
 
-Show Kafka and the in-memory pipeline continuing where possible while DB failures become
-visible. State that the current session runtime still awaits bounded repository retries.
-The production target moves persistence behind Kafka consumers/outbox workers so
-Postgres is not between live stages.
+Show Kafka and the in-memory pipeline continuing while the event worker retries without
+committing its offset. Resume Postgres and show delayed call/billing records appear.
 
 ## 2:25-3:00 - Temporal Worker Recovery
 

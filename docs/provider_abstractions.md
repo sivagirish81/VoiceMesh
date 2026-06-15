@@ -46,23 +46,24 @@ the session runtime owns the active-turn decision.
 The POC registry is the construction boundary and fails fast when OpenAI is selected
 without `OPENAI_API_KEY`. It currently implements:
 
-- `OpenAISTTProvider.transcribe`, which submits one finalized WAV to
-  `gpt-4o-transcribe`;
+- `OpenAISTTProvider.open_stream`, which opens a transcription-intent Realtime
+  WebSocket, continuously appends 24 kHz PCM to `gpt-realtime-whisper`, emits deltas,
+  and manually commits at a turn boundary;
 - `OpenAILLMProvider.stream_generate`, which streams text deltas from
-  `gpt-4.1-mini`; and
-- `OpenAITTSProvider.synthesize`, which streams PCM from `gpt-4o-mini-tts`.
+  `gpt-4.1-mini` and records provider-reported token usage; and
+- `OpenAITTSProvider.synthesize`, which streams PCM from `gpt-4o-mini-tts` and records
+  PCM duration plus estimated text/audio token units.
 
 `StreamModule` receives interface instances and does not import concrete OpenAI classes.
-That is a useful boundary, but the current STT interface is one-shot, transport is typed
-directly as `BrowserWebSocketTransport`, and cancellation is not part of the contracts.
+Transport is still typed directly as `BrowserWebSocketTransport`, and cancellation is
+not yet part of the contracts.
 
 ## Production Direction
 
 Evolve the interfaces without changing the session algorithm:
 
-- replace one-shot `transcribe(bytes)` with a streaming STT session;
-- add provider-neutral partial/final transcript events;
 - add `response_id` and cancellation to LLM and TTS;
+- normalize STT provider item ordering and cancellation;
 - normalize tool-call requests and usage;
 - expose time to first token and first audio byte from adapters;
 - move audio format conversion into adapters or a media normalization layer; and

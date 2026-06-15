@@ -17,6 +17,7 @@ Postgres, OpenTelemetry, Jaeger, Prometheus, and Grafana.
 - Kafka event streaming, replay, and duplicate-delivery experiments
 - Temporal worker recovery for durable outer-loop work
 - Postgres idempotency and transactional outbox mechanics
+- Per-call provider usage metering and a finalized billing ledger
 - OpenTelemetry traces and Prometheus metrics
 - Provider latency/failure and database-outage injection
 - A Next.js dashboard with browser microphone and PCM playback
@@ -70,16 +71,22 @@ The working implementation intentionally has several simpler boundaries:
 
 - Browser WebSocket is the demo transport adapter.
 - VAD is RMS energy over real microphone PCM.
-- STT buffers a completed turn, creates WAV, and calls OpenAI transcription.
+- A long-lived OpenAI Realtime transcription session receives 24 kHz PCM continuously,
+  emits partial deltas, and is committed at the detected turn boundary.
 - LLM and TTS stream through real bounded in-memory queues.
-- Token and audio-chunk metadata is published to Kafka for lab visibility.
-- The session runtime currently awaits Kafka and Postgres operations.
-- A Temporal workflow starts per call and currently receives cork/uncork signals.
+- Kafka receives coarse stage, lifecycle, provider, and usage events; raw audio, LLM
+  tokens, and TTS chunks remain in memory/WebSocket only.
+- A Kafka consumer projects calls, events, metrics, idempotency keys, usage, and billing
+  into Postgres outside the live provider chain.
+- Billing uses measured STT audio duration, provider-reported LLM tokens, estimated TTS
+  tokens, and a configurable per-minute platform fee.
+- A Temporal workflow still starts per call for the recovery lab, but routine
+  cork/uncork is no longer signaled to it.
 - Full-duplex barge-in, response fencing, and provider cancellation are not implemented.
 
 These are documented current behaviors, not the recommended production architecture.
-The target is streaming STT, coarse asynchronous events, asynchronous persistence, and
-Temporal only in the durable outer loop.
+The next production-oriented step is turn fencing, cancellation, and moving Temporal
+entirely to lifecycle work that genuinely requires durable workflow semantics.
 
 ## Kafka, Postgres, And Temporal
 
@@ -99,6 +106,22 @@ simpler when durable workflow semantics are unnecessary.
 See [docs/kafka_vs_temporal.md](docs/kafka_vs_temporal.md),
 [docs/events.md](docs/events.md), and
 [docs/postgres_reliability.md](docs/postgres_reliability.md).
+
+## Billing
+
+The event worker turns `usage.stt`, `usage.llm`, and `usage.tts` events into immutable
+`usage_records`, applies the versioned `pricing_catalog`, and rolls costs into
+`call_billing`. The bill is:
+
+`provider cost + configurable platform fee per call minute`
+
+STT audio duration and LLM token counts are measured. TTS input/output tokens are
+estimated from synthesized text and PCM duration because the current Speech API
+response does not expose token usage; the dashboard labels those rows as estimated.
+
+Open [http://localhost:3000/billing](http://localhost:3000/billing) for totals,
+per-model usage, and the per-call ledger. Pricing is a dated local snapshot for this
+lab, not an invoice from OpenAI. See [docs/billing.md](docs/billing.md).
 
 ## Provider Adapters
 
@@ -129,6 +152,7 @@ make up
 Open:
 
 - Dashboard: [http://localhost:3000/demo](http://localhost:3000/demo)
+- Billing: [http://localhost:3000/billing](http://localhost:3000/billing)
 - FastAPI: [http://localhost:8000/docs](http://localhost:8000/docs)
 - Temporal UI: [http://localhost:8080](http://localhost:8080)
 - Kafka UI: [http://localhost:8081](http://localhost:8081)
@@ -141,8 +165,8 @@ Open:
 2. Open `http://localhost:3000/demo`.
 3. Select **Start microphone** and allow microphone access.
 4. Speak, then pause for roughly 700 ms.
-5. Watch the current buffered STT turn finalize, LLM tokens stream, TTS audio arrive,
-   and the browser play 24 kHz PCM.
+5. Watch partial STT text arrive while PCM is still streaming, then the final turn,
+   LLM tokens, TTS audio, and browser playback.
 6. Search the call trace in Jaeger under `voicemesh-api`.
 
 The browser sends signed 16-bit PCM chunks. VAD measures real sample amplitude rather
@@ -176,10 +200,9 @@ publishes `duplicate_event.ignored`.
 
 ### Postgres Down
 
-`make demo-db-down` pauses Postgres for 15 seconds. Kafka and much of the in-memory path
-remain available, while bounded DB retries and failures are visible. Current writes
-that exhaust retries are not reconstructed automatically. The production direction is
-Kafka-backed asynchronous persistence and reconciliation.
+`make demo-db-down` pauses Postgres for 15 seconds. The live path and Kafka remain
+available. The `event-worker` does not commit the failed Kafka offset, recreates its
+consumer after bounded DB retries, and projects the event after Postgres returns.
 
 ### Temporal Worker Crash
 
@@ -197,6 +220,7 @@ outer-loop recovery, not recovery of an active browser or provider media stream.
 | `make logs` | Follow service logs |
 | `make api` | Run FastAPI locally |
 | `make worker` | Run the Temporal worker locally |
+| `make event-worker` | Run the Kafka-to-Postgres projection and outbox worker locally |
 | `make dashboard` | Run Next.js locally |
 | `make migrate` | Reapply the idempotent SQL migration |
 | `make create-topics` | Create required Kafka topics |
@@ -236,7 +260,8 @@ The production contract should add:
 
 VoiceMesh uses Pydantic validation today. A production deployment should add a schema
 registry and compatibility checks. Topics currently include `call-events`,
-`pipeline-events`, `provider-events`, `outbox-events`, and `dead-letter-events`.
+`pipeline-events`, `provider-events`, `usage-events`, `billing-events`,
+`outbox-events`, and `dead-letter-events`.
 
 ## Observability
 
@@ -259,6 +284,7 @@ See [docs/otel_tracing.md](docs/otel_tracing.md).
 - [Kafka versus Temporal](docs/kafka_vs_temporal.md)
 - [Provider adapters](docs/provider_abstractions.md)
 - [Postgres reliability](docs/postgres_reliability.md)
+- [Billing pipeline](docs/billing.md)
 - [OpenTelemetry](docs/otel_tracing.md)
 - [Multi-tenant scaling and webhooks](docs/scaling.md)
 - [Failure modes](docs/failure_modes.md)
@@ -266,29 +292,30 @@ See [docs/otel_tracing.md](docs/otel_tracing.md).
 
 ## Known Limitations
 
-- STT is buffered per completed turn rather than continuously streamed.
 - RMS VAD is environment-sensitive and lacks production endpointing calibration.
 - Browser capture uses `ScriptProcessorNode`; an AudioWorklet is the migration path.
 - Barge-in, response fencing, playback cancellation, and stale-chunk drops are absent.
 - Only OpenAI provider adapters are implemented.
-- Kafka publication and Postgres writes currently occur synchronously in `emit()`.
-- Fine-grained token/chunk events are over-published for lab visibility.
-- Critical events currently use direct Kafka publication plus outbox insertion, which
-  can create duplicate Kafka deliveries.
-- Temporal currently tracks routine call and backpressure state more closely than the
-  recommended durable outer-loop model.
-- Failed non-critical writes are visible but are not automatically reconciled.
+- Kafka publishing is awaited by the session worker; a production runtime should use a
+  bounded asynchronous publication buffer or local durable handoff.
+- The POC event envelope lacks tenant, assistant, response, and schema-version fields.
+- Temporal still starts at call admission for the worker-recovery demo instead of only
+  being started by lifecycle events that require durable orchestration.
+- TTS token usage is estimated and should be replaced by provider-reported usage when
+  available.
+- The local pricing catalog is manually versioned and is not synchronized from provider
+  invoices or enterprise contract rates.
 - Docker Compose, Jaeger, Prometheus, and Grafana are local examples, not a production
   deployment, retention plan, or multi-region design.
 
 ## Future Work
 
-- Streaming STT with normalized partial/final events
 - Turn/response fencing, barge-in, and cooperative provider cancellation
 - Media gateway plus WebRTC/SIP/telephony transport adapters
-- Asynchronous Kafka-to-Postgres persistence and one authoritative outbox boundary
-- Coarse event defaults with diagnostic sampling
+- Bounded asynchronous Kafka publication from the session runtime
+- Versioned tenant-aware event envelopes and schema registry compatibility checks
 - Tenant configuration cache, quotas, and load-aware call placement
 - Customer tool/webhook delivery state and durable retry workflows
 - Local Whisper, Ollama, and Piper adapters
+- Provider invoice reconciliation and contract-aware pricing
 - Kafka lag, Postgres pool-wait, and end-of-speech-to-first-audio metrics

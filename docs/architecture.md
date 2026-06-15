@@ -227,14 +227,15 @@ reports should always be asynchronous and retryable, with delivery state in Post
 |---|---|---|
 | Transport | Browser WebSocket carrying PCM | Media gateway with WebRTC, SIP, or telephony adapters routing calls to session workers |
 | VAD | RMS energy over real PCM | WebRTC VAD, Silero, or provider-native endpointing with calibrated interruption handling |
-| STT | Buffers one speech turn, creates WAV, then calls OpenAI transcription | Long-lived streaming STT connection receiving frames continuously and emitting partial/final transcripts |
+| STT | Long-lived OpenAI Realtime transcription session receives resampled 24 kHz PCM, emits partial deltas, and is manually committed at the VAD turn boundary | Add provider cancellation, item-order reconciliation, domain evaluation, and fallback routing |
 | LLM | OpenAI streaming text deltas | Streaming adapter with response IDs, cancellation, tool-call normalization, and provider routing |
 | TTS | Phrase-triggered OpenAI PCM stream | Streaming adapter with cancellable response IDs and playback acknowledgements |
 | Backpressure | Real bounded token/audio queues and cork/uncork callbacks | Turn-scoped queues, explicit cancellation, partial coalescing, stale-item drops, and SLO-based escalation |
-| Kafka | Publishes each LLM token and TTS chunk metadata for lab visibility | Coarse events by default; sampled or temporary fine-grained debug streams |
-| Postgres | `emit()` awaits event persistence and state updates | Async Kafka consumers/outbox workers; no synchronous DB dependency between live stages |
-| Outbox | Critical events are both directly published and inserted into outbox | One authoritative publication path per logical event with explicit deduplication |
-| Temporal | Workflow starts per call and receives cork/uncork/provider signals | Durable outer-loop workflows only for lifecycle actions and retry-heavy side effects |
+| Kafka | Publishes coarse lifecycle, stage, provider, usage, and backpressure events; no raw frames, LLM tokens, or TTS chunks | Add schema registry, W3C headers, lag SLOs, and bounded asynchronous publication |
+| Postgres | Dedicated Kafka event worker projects calls, events, metrics, usage, billing, and idempotency outside the provider chain | Separate ingestion/query pools, reconciliation tooling, and tenant-aware retention |
+| Outbox | Billing events created from a DB usage projection are written atomically to the outbox and published once by the worker | Scale publishers with leases, stronger delivery metrics, and explicit event ownership |
+| Temporal | Workflow starts per call for the lifecycle recovery lab; routine cork/uncork stays in memory | Start or signal workflows only for post-call, webhook, tool, and retry-heavy lifecycle work |
+| Billing | Versioned price catalog, immutable usage records, per-call rollup, and dashboard; TTS token units are estimated | Provider invoice reconciliation, contract rates, taxes/credits, and tenant wallets |
 | Identity | `call_id`, `turn_id`, sequence, event ID, trace ID | Add tenant, assistant, response, schema version, and propagated trace context |
 | Deployment | Single-host Docker Compose | Replicated services, call-aware routing, autoscaling, quotas, and failure-domain isolation |
 

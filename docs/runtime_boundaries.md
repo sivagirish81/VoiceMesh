@@ -25,26 +25,26 @@ socket or browser audio buffer.
 
 - receives real PCM from `BrowserWebSocketTransport`;
 - runs RMS energy VAD and silence-based endpointing;
-- buffers a completed speech turn and submits WAV to OpenAI STT;
+- keeps an OpenAI Realtime transcription WebSocket open for the call;
+- resamples browser PCM to 24 kHz, appends frames as speech arrives, displays transcript
+  deltas, and commits the provider buffer at the VAD/end-turn boundary;
 - streams OpenAI LLM deltas into a bounded token queue;
 - groups text at punctuation or a character threshold;
 - streams OpenAI TTS PCM into a bounded audio queue; and
 - sends audio to the browser over WebSocket.
 
-This is a real vertical slice, but STT is buffered rather than streaming and the
-runtime does not yet implement full-duplex barge-in or response fencing.
+This is a real streaming vertical slice. The runtime does not yet implement
+full-duplex barge-in, response fencing, or cooperative provider cancellation.
 
-## Production Streaming STT
+## Streaming STT Boundary
 
-A production STT adapter should maintain a streaming connection for the active call or
-turn. Audio frames flow continuously to the adapter, which emits normalized events:
+The implemented `StreamingSTTSession` maintains a provider connection for the active
+call. Audio frames flow continuously to the adapter, which provides:
 
-- `speech_started`
-- `partial_transcript`
-- `final_transcript`
-- `speech_ended`
-- `provider_error`
-- `provider_timeout`
+- `append_audio(audio_chunk, sample_rate)`
+- a partial-transcript callback
+- `commit()` returning a final transcript and provider item ID
+- `close()`
 
 The LLM should normally receive only stable final user turns. Partials are useful for
 captions, early intent hints, interruption detection, or sampled diagnostics, but
@@ -55,7 +55,9 @@ The final transcript has two independent destinations:
 1. direct in-memory handoff from the session worker to the LLM; and
 2. asynchronous `stt.final_transcript` publication to Kafka.
 
-The second destination must not delay the first.
+The current publisher is asynchronous with respect to Postgres but is still awaited by
+the session coroutine. A production worker should place the second destination behind
+a bounded event publisher so broker latency cannot delay the first.
 
 ## Turn And Response Fences
 
