@@ -62,6 +62,7 @@ class StreamModule:
         self._turn_audio_bytes = 0
         self._turn_lock = asyncio.Lock()
         self._closed = False
+        self._failed = False
         self._call_started_at = time.monotonic()
 
     async def run(self) -> None:
@@ -479,6 +480,7 @@ class StreamModule:
         return event
 
     async def _fail_call(self, error: str) -> None:
+        self._failed = True
         await self.emit(
             EventType.CALL_FAILED,
             self.state.current_stage,
@@ -492,6 +494,8 @@ class StreamModule:
         if self._closed:
             return
         self._closed = True
+        if self._failed:
+            return
         with suppress(Exception):
             await self.emit(
                 EventType.CALL_ENDED,
