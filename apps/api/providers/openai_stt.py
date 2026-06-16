@@ -1,10 +1,13 @@
 import asyncio
 import base64
 import json
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from typing import Any
 
+from opentelemetry import trace
+from opentelemetry.trace import SpanKind, Status, StatusCode
 from websockets.asyncio.client import ClientConnection, connect
 
 from apps.api.failure_injection.injector import FailureInjector
@@ -14,8 +17,10 @@ from apps.api.providers.base import (
     STTProvider,
     TranscriptionResult,
 )
+from apps.api.telemetry.tracing import set_span_attributes
 
 TranscriptDeltaCallback = Callable[[str], Awaitable[None]]
+tracer = trace.get_tracer(__name__)
 
 
 class OpenAIStreamingSTTSession(StreamingSTTSession):
@@ -42,42 +47,70 @@ class OpenAIStreamingSTTSession(StreamingSTTSession):
         self._ready: asyncio.Future[None] | None = None
         self._pending_result: asyncio.Future[TranscriptionResult] | None = None
         self._buffered_samples = 0
+        self._buffered_bytes = 0
+        self._append_count = 0
         self._commit_audio_seconds = 0.0
         self._commit_lock = asyncio.Lock()
 
     async def start(self) -> None:
         self._ready = asyncio.get_running_loop().create_future()
-        self._websocket = await connect(
-            "wss://api.openai.com/v1/realtime?intent=transcription",
-            additional_headers={"Authorization": f"Bearer {self._api_key}"},
-            max_size=8 * 1024 * 1024,
-            ping_interval=20,
-            ping_timeout=20,
-        )
-        self._reader_task = asyncio.create_task(self._read_events())
-        transcription: dict[str, Any] = {
-            "model": self._model,
-            "delay": self._delay,
-        }
-        if self._language:
-            transcription["language"] = self._language
-        await self._send(
-            {
-                "type": "session.update",
-                "session": {
-                    "type": "transcription",
-                    "audio": {
-                        "input": {
-                            "format": {"type": "audio/pcm", "rate": self.target_sample_rate},
-                            "transcription": transcription,
-                            "turn_detection": None,
-                        }
-                    },
-                },
+        endpoint = "wss://api.openai.com/v1/realtime"
+        span = tracer.start_span("provider.openai.stt.connect", kind=SpanKind.CLIENT)
+        started = time.perf_counter()
+        try:
+            set_span_attributes(
+                span,
+                provider="openai",
+                provider_stage="stt",
+                model=self._model,
+                endpoint=endpoint,
+                realtime_intent="transcription",
+                language=self._language,
+                transcription_delay=self._delay,
+                target_sample_rate=self.target_sample_rate,
+            )
+            self._websocket = await connect(
+                f"{endpoint}?intent=transcription",
+                additional_headers={"Authorization": f"Bearer {self._api_key}"},
+                max_size=8 * 1024 * 1024,
+                ping_interval=20,
+                ping_timeout=20,
+            )
+            self._reader_task = asyncio.create_task(self._read_events())
+            transcription: dict[str, Any] = {
+                "model": self._model,
+                "delay": self._delay,
             }
-        )
-        async with asyncio.timeout(10):
-            await self._ready
+            if self._language:
+                transcription["language"] = self._language
+            await self._send(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "type": "transcription",
+                        "audio": {
+                            "input": {
+                                "format": {
+                                    "type": "audio/pcm",
+                                    "rate": self.target_sample_rate,
+                                },
+                                "transcription": transcription,
+                                "turn_detection": None,
+                            }
+                        },
+                    },
+                }
+            )
+            async with asyncio.timeout(10):
+                await self._ready
+            set_span_attributes(span, ready=True)
+        except Exception as exc:
+            span.record_exception(exc)
+            span.set_status(Status(StatusCode.ERROR, str(exc)))
+            raise
+        finally:
+            set_span_attributes(span, latency_ms=(time.perf_counter() - started) * 1000)
+            span.end()
 
     async def append_audio(self, audio_chunk: bytes, sample_rate: int) -> None:
         normalized = resample_pcm16_mono(
@@ -86,6 +119,8 @@ class OpenAIStreamingSTTSession(StreamingSTTSession):
         if not normalized:
             return
         self._buffered_samples += len(normalized) // 2
+        self._buffered_bytes += len(normalized)
+        self._append_count += 1
         await self._send(
             {
                 "type": "input_audio_buffer.append",
@@ -101,9 +136,40 @@ class OpenAIStreamingSTTSession(StreamingSTTSession):
                 await self._failure_injector.before_provider("stt")
             self._pending_result = asyncio.get_running_loop().create_future()
             self._commit_audio_seconds = self._buffered_samples / self.target_sample_rate
+            buffered_bytes = self._buffered_bytes
+            append_count = self._append_count
             self._buffered_samples = 0
-            await self._send({"type": "input_audio_buffer.commit"})
-            return await self._pending_result
+            self._buffered_bytes = 0
+            self._append_count = 0
+            span = tracer.start_span("provider.openai.stt.commit", kind=SpanKind.CLIENT)
+            started = time.perf_counter()
+            try:
+                set_span_attributes(
+                    span,
+                    provider="openai",
+                    provider_stage="stt",
+                    model=self._model,
+                    endpoint="wss://api.openai.com/v1/realtime",
+                    audio_seconds=self._commit_audio_seconds,
+                    audio_bytes=buffered_bytes,
+                    appended_chunks=append_count,
+                    target_sample_rate=self.target_sample_rate,
+                )
+                await self._send({"type": "input_audio_buffer.commit"})
+                result = await self._pending_result
+                set_span_attributes(
+                    span,
+                    transcript_chars=len(result.transcript),
+                    provider_item_id=result.item_id,
+                )
+                return result
+            except Exception as exc:
+                span.record_exception(exc)
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                raise
+            finally:
+                set_span_attributes(span, latency_ms=(time.perf_counter() - started) * 1000)
+                span.end()
 
     async def close(self) -> None:
         if self._websocket:

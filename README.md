@@ -276,8 +276,9 @@ Jaeger stores local traces in a Badger-backed `jaeger-data` Compose volume inste
 pure memory, and FastAPI `/metrics` is excluded from tracing so Prometheus scrapes do
 not bury the useful call traces. A good call trace under `voicemesh-api` should include
 `voice.call`, `pipeline.vad`, `pipeline.stt`, `pipeline.llm`, `pipeline.tts`,
-`kafka.publish`, downstream `kafka.consume`, `postgres.project_event`, and relevant
-`temporal.activity.*` spans.
+OpenAI provider spans such as `provider.openai.llm.responses_stream` and
+`provider.openai.tts.speech_stream`, `kafka.publish`, downstream `kafka.consume`,
+`postgres.project_event`, and relevant `temporal.activity.*` spans.
 
 The primary latency SLI is end-of-speech to first audible agent audio. Component metrics
 should include STT final latency, LLM time to first token, TTS time to first audio byte,

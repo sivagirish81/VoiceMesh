@@ -99,6 +99,10 @@ For a useful call trace, expect to see:
   attributes;
 - `pipeline.vad`, `pipeline.stt`, `pipeline.llm`, `pipeline.tts`, and
   `pipeline.backpressure` spans;
+- `provider.openai.stt.connect`, `provider.openai.stt.commit`,
+  `provider.openai.llm.responses_stream`, and `provider.openai.tts.speech_stream`
+  spans with provider/model/endpoint and first-token or first-audio timing where
+  applicable;
 - `kafka.publish` spans from the API service;
 - `kafka.consume` and `postgres.project_event` spans from `voicemesh-event-worker`; and
 - `temporal.activity.*` spans from `voicemesh-temporal-worker` for lifecycle work.
