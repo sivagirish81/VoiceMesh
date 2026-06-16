@@ -8,6 +8,7 @@ from opentelemetry import trace
 
 from apps.api.pipeline.events import AudioFrame
 from apps.api.providers.base import Transport
+from apps.api.telemetry.tracing import set_span_attributes
 
 tracer = trace.get_tracer(__name__)
 
@@ -24,24 +25,39 @@ class BrowserWebSocketTransport(Transport):
 
     async def receive_messages(self) -> AsyncIterator[AudioFrame | dict[str, Any]]:
         while not self._closed:
-            with tracer.start_as_current_span("websocket.receive"):
+            outbound: AudioFrame | dict[str, Any] | None = None
+            with tracer.start_as_current_span("websocket.receive") as span:
                 message = await self.websocket.receive()
-            if message["type"] == "websocket.disconnect":
-                self._closed = True
-                return
-            if message.get("bytes") is not None:
-                yield AudioFrame(
-                    data=message["bytes"],
-                    sample_rate=self.sample_rate,
-                    channels=self.channels,
-                )
-                continue
-            if message.get("text"):
-                payload = json.loads(message["text"])
-                if payload.get("type") == "audio.config":
-                    self.sample_rate = int(payload.get("sample_rate", 16000))
-                    self.channels = int(payload.get("channels", 1))
-                yield payload
+                if message["type"] == "websocket.disconnect":
+                    set_span_attributes(span, message_type="websocket.disconnect")
+                    self._closed = True
+                    return
+                if message.get("bytes") is not None:
+                    set_span_attributes(
+                        span,
+                        message_type="audio.chunk",
+                        audio_bytes=len(message["bytes"]),
+                        sample_rate=self.sample_rate,
+                        channels=self.channels,
+                    )
+                    outbound = AudioFrame(
+                        data=message["bytes"],
+                        sample_rate=self.sample_rate,
+                        channels=self.channels,
+                    )
+                elif message.get("text"):
+                    payload = json.loads(message["text"])
+                    set_span_attributes(
+                        span,
+                        message_type=str(payload.get("type") or "json"),
+                        text_bytes=len(message["text"]),
+                    )
+                    if payload.get("type") == "audio.config":
+                        self.sample_rate = int(payload.get("sample_rate", 16000))
+                        self.channels = int(payload.get("channels", 1))
+                    outbound = payload
+            if outbound is not None:
+                yield outbound
 
     async def receive_audio(self) -> AsyncIterator[bytes]:
         async for message in self.receive_messages():
@@ -50,7 +66,13 @@ class BrowserWebSocketTransport(Transport):
 
     async def send_json(self, event_type: str, **payload: Any) -> None:
         with tracer.start_as_current_span("websocket.send") as span:
-            span.set_attribute("message.type", event_type)
+            set_span_attributes(
+                span,
+                message_type=event_type,
+                audio_bytes=len(payload.get("audio", "")) * 3 // 4
+                if event_type == "audio.chunk"
+                else None,
+            )
             await self.websocket.send_json({"type": event_type, **payload})
 
     async def send_audio(self, audio_chunk: bytes) -> None:

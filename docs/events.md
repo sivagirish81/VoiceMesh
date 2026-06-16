@@ -140,7 +140,12 @@ checks in CI and at producer deployment time.
 
 ## Trace Propagation
 
-The event should retain a correlation `trace_id`, but asynchronous trace continuation
-should use W3C `traceparent` and `tracestate` Kafka headers. Consumers create linked or
-continued spans according to the processing model. Serialized trace IDs alone are
-useful for search but do not provide complete context propagation.
+Events retain a correlation `trace_id`, and Kafka producers inject W3C `traceparent`
+and `tracestate` headers on produced records. Kafka consumers extract those headers
+before creating consume/projection spans, so the local lab can show API publish,
+event-worker consume, and Postgres projection work in the same Jaeger trace.
+
+Serialized trace IDs are still useful for search and UI links, but full asynchronous
+trace continuation should rely on propagated context. Production consumers may choose
+continued spans or linked spans depending on whether the downstream work is causally in
+line with the request or a later fanout/replay process.

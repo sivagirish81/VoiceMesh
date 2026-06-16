@@ -27,14 +27,25 @@ audio, full transcripts, prompts, or secrets in span attributes.
 
 ## Context Propagation
 
-The live coroutine chain can continue the current span context. Kafka should propagate
-W3C `traceparent` and `tracestate` headers; consumers create continued or linked spans.
-Temporal should use interceptors or explicit safe context fields where appropriate.
-Webhook requests should include trace correlation without exposing internal credentials.
+The live coroutine chain continues the current span context through the session worker.
+Kafka producers inject W3C `traceparent` and `tracestate` headers, and consumers extract
+those headers before creating `kafka.consume` and downstream projection spans. This makes
+a normal call trace cross:
 
-The POC stores a `trace_id` in its serialized event but does not propagate full W3C
-context through Kafka headers or Temporal. That supports search correlation, not full
-distributed trace continuity.
+`voicemesh-api -> Kafka publish -> voicemesh-event-worker -> Postgres projection`
+
+Temporal receives explicit safe trace context in lifecycle signal payloads, and
+activities extract that context before creating `temporal.activity.*` spans. This is
+enough for the local lab to correlate important durable lifecycle work with the call
+that caused it.
+
+Remaining production hardening:
+
+- use Temporal interceptors for workflow/activity propagation instead of explicit
+  payload fields;
+- propagate context through customer webhook/tool calls;
+- decide where async consumers should create child spans versus linked spans; and
+- avoid placing raw audio, full transcripts, prompts, or secrets in span attributes.
 
 ## User-Facing Latency
 
@@ -77,7 +88,26 @@ pool wait, or webhook delivery.
 
 ## Local Tooling
 
-Open Jaeger at `http://localhost:16686`, select `voicemesh-api`, and search around the
-call timestamp. Grafana at `http://localhost:3001` contains the local VoiceMesh
-dashboard. These Compose services demonstrate instrumentation flow; they are not a
-production observability deployment or retention design.
+Open Jaeger at `http://localhost:16686`, select `voicemesh-api`, and search for
+operation `voice.call`. The call detail page also exposes the trace ID emitted on
+pipeline events; paste that ID directly into Jaeger when a trace is hard to find.
+
+For a useful call trace, expect to see:
+
+- `voice.call` as the parent span for a browser/WebSocket call;
+- `websocket.receive` and `websocket.send` spans with message type and audio-byte
+  attributes;
+- `pipeline.vad`, `pipeline.stt`, `pipeline.llm`, `pipeline.tts`, and
+  `pipeline.backpressure` spans;
+- `kafka.publish` spans from the API service;
+- `kafka.consume` and `postgres.project_event` spans from `voicemesh-event-worker`; and
+- `temporal.activity.*` spans from `voicemesh-temporal-worker` for lifecycle work.
+
+FastAPI `/metrics` requests are intentionally excluded from tracing so Prometheus
+scrapes do not bury real call traces. Jaeger uses a local Badger volume
+(`jaeger-data`) instead of in-memory storage, so traces survive normal container
+restarts. Removing the Compose volume still deletes local trace history.
+
+Grafana at `http://localhost:3001` contains the local VoiceMesh dashboard. These Compose
+services demonstrate instrumentation flow; they are not a production observability
+deployment or retention design.
