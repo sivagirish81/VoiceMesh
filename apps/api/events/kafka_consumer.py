@@ -4,8 +4,10 @@ from collections.abc import Awaitable, Callable
 
 from aiokafka import AIOKafkaConsumer
 from opentelemetry import trace
+from opentelemetry.trace import SpanKind
 
 from apps.api.events.schemas import PipelineEvent
+from apps.api.telemetry.tracing import context_from_kafka_headers, set_span_attributes
 
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -20,6 +22,7 @@ class KafkaEventConsumer:
         *topics: str,
     ) -> None:
         self._handler = handler
+        self._group_id = group_id
         self._consumer = AIOKafkaConsumer(
             *topics,
             bootstrap_servers=bootstrap_servers,
@@ -32,9 +35,32 @@ class KafkaEventConsumer:
         await self._consumer.start()
         try:
             async for message in self._consumer:
-                with tracer.start_as_current_span("kafka.consume"):
+                parent_context = context_from_kafka_headers(message.headers)
+                topic = message.topic
+                with tracer.start_as_current_span(
+                    "kafka.consume",
+                    context=parent_context,
+                    kind=SpanKind.CONSUMER,
+                ) as span:
                     try:
                         event = PipelineEvent.model_validate(json.loads(message.value))
+                        set_span_attributes(
+                            span,
+                            **{
+                                "messaging.system": "kafka",
+                                "messaging.destination.name": topic,
+                                "messaging.kafka.partition": message.partition,
+                                "messaging.kafka.offset": message.offset,
+                                "messaging.kafka.consumer_group": self._group_id,
+                                "call_id": event.call_id,
+                                "turn_id": event.turn_id,
+                                "event_id": str(event.event_id),
+                                "event_type": str(event.event_type),
+                                "stage": event.stage,
+                                "idempotency_key": event.idempotency_key,
+                                "sequence_number": event.sequence_number,
+                            },
+                        )
                         await self._handler(event)
                         await self._consumer.commit()
                     except Exception:

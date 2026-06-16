@@ -123,11 +123,18 @@ services:
 
   jaeger:
     image: jaegertracing/all-in-one:1.68.0
+    user: "0"
     ports:
       - "16686:16686"
       - "14250:14250"
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
+      SPAN_STORAGE_TYPE: badger
+      BADGER_EPHEMERAL: "false"
+      BADGER_DIRECTORY_KEY: /badger/key
+      BADGER_DIRECTORY_VALUE: /badger/data
+    volumes:
+      - jaeger-data:/badger
 
   prometheus:
     image: prom/prometheus:v3.3.0
@@ -217,3 +224,4 @@ volumes:
   postgres-data:
   kafka-data:
   grafana-data:
+  jaeger-data:

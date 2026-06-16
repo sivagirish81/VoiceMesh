@@ -24,7 +24,7 @@ from apps.api.providers.base import (
     TTSProvider,
 )
 from apps.api.telemetry.metrics import ACTIVE_CALLS, PROVIDER_FAILURES, STAGE_LATENCY
-from apps.api.telemetry.tracing import current_trace_id
+from apps.api.telemetry.tracing import current_trace_id, set_span_attributes
 from apps.api.temporal_client import TemporalLifecycleClient
 from apps.api.websocket_transport import BrowserWebSocketTransport
 
@@ -68,55 +68,84 @@ class StreamModule:
     async def run(self) -> None:
         ACTIVE_CALLS.inc()
         await self.transport.accept()
-        try:
-            self._stt_session = await self.stt.open_stream(self._on_stt_delta)
-            await self.temporal.start_call(self.call_id)
-            await self.emit(
-                EventType.CALL_STARTED,
-                "transport",
-                turn_id="session",
-                payload={
-                    "providers": {
-                        "stt": self.stt.name,
-                        "llm": self.llm.name,
-                        "tts": self.tts.name,
-                    },
-                    "models": {
-                        "stt": self.stt.model,
-                        "llm": self.llm.model,
-                        "tts": self.tts.model,
-                    }
-                },
+        with tracer.start_as_current_span("voice.call") as span:
+            set_span_attributes(
+                span,
+                call_id=self.call_id,
+                stt_provider=self.stt.name,
+                llm_provider=self.llm.name,
+                tts_provider=self.tts.name,
+                stt_model=self.stt.model,
+                llm_model=self.llm.model,
+                tts_model=self.tts.model,
             )
-            await self.transport.send_json("call.started", call_id=self.call_id)
-            async for message in self.transport.receive_messages():
-                if isinstance(message, AudioFrame):
-                    await self._handle_audio(message)
-                elif message.get("type") == "audio.end_turn":
-                    await self._finalize_turn()
-                elif message.get("type") == "client.ping":
-                    await self.transport.send_json("client.pong")
-                elif message.get("type") == "call.end":
-                    break
-        except WebSocketDisconnect:
-            logger.info("browser disconnected", extra={"call_id": self.call_id})
-        except Exception as exc:
-            logger.exception("call pipeline failed", extra={"call_id": self.call_id})
-            with suppress(Exception):
-                await self._fail_call(str(exc))
-        finally:
-            await self._end_call()
-            if self._stt_session:
+            try:
+                self._stt_session = await self.stt.open_stream(self._on_stt_delta)
+                await self.temporal.start_call(self.call_id)
+                await self.emit(
+                    EventType.CALL_STARTED,
+                    "transport",
+                    turn_id="session",
+                    payload={
+                        "providers": {
+                            "stt": self.stt.name,
+                            "llm": self.llm.name,
+                            "tts": self.tts.name,
+                        },
+                        "models": {
+                            "stt": self.stt.model,
+                            "llm": self.llm.model,
+                            "tts": self.tts.model,
+                        },
+                    },
+                )
+                await self.transport.send_json("call.started", call_id=self.call_id)
+                async for message in self.transport.receive_messages():
+                    if isinstance(message, AudioFrame):
+                        await self._handle_audio(message)
+                    elif message.get("type") == "audio.end_turn":
+                        await self._finalize_turn()
+                    elif message.get("type") == "client.ping":
+                        await self.transport.send_json("client.pong")
+                    elif message.get("type") == "call.end":
+                        break
+            except WebSocketDisconnect:
+                logger.info("browser disconnected", extra={"call_id": self.call_id})
+            except Exception as exc:
+                span.record_exception(exc)
+                span.set_attribute("error", True)
+                logger.exception("call pipeline failed", extra={"call_id": self.call_id})
                 with suppress(Exception):
-                    await self._stt_session.close()
-            ACTIVE_CALLS.dec()
+                    await self._fail_call(str(exc))
+            finally:
+                set_span_attributes(
+                    span,
+                    final_stage=self.state.current_stage,
+                    corked=self.state.corked,
+                    final_response_chars=len(self.state.response),
+                    duration_seconds=time.monotonic() - self._call_started_at,
+                    failed=self._failed,
+                )
+                await self._end_call()
+                if self._stt_session:
+                    with suppress(Exception):
+                        await self._stt_session.close()
+                ACTIVE_CALLS.dec()
 
     async def _handle_audio(self, frame: AudioFrame) -> None:
         chunk_duration_ms = len(frame.data) / (2 * frame.sample_rate) * 1000
         with tracer.start_as_current_span("pipeline.vad") as span:
             speech = await self.vad.detect_speech(frame.data)
-            span.set_attribute("call_id", self.call_id)
-            span.set_attribute("speech", speech)
+            set_span_attributes(
+                span,
+                call_id=self.call_id,
+                turn_id=self.state.turn_id,
+                stage="vad",
+                speech=speech,
+                audio_bytes=len(frame.data),
+                sample_rate=frame.sample_rate,
+                chunk_duration_ms=chunk_duration_ms,
+            )
         started, ended = self.turn_detector.update(speech, chunk_duration_ms)
         if started:
             self.state.turn_id = str(uuid4())
@@ -161,13 +190,25 @@ class StreamModule:
         started = time.perf_counter()
         try:
             with tracer.start_as_current_span("pipeline.stt") as span:
-                span.set_attribute("call_id", self.call_id)
-                span.set_attribute("turn_id", turn_id)
-                span.set_attribute("provider", self.stt.name)
+                set_span_attributes(
+                    span,
+                    call_id=self.call_id,
+                    turn_id=turn_id,
+                    stage="stt",
+                    provider=self.stt.name,
+                    model=self.stt.model,
+                    timeout_seconds=self.settings.turn_timeout_seconds,
+                )
                 if not self._stt_session:
                     raise RuntimeError("Streaming STT session is not available")
                 async with asyncio.timeout(self.settings.turn_timeout_seconds):
                     result = await self._stt_session.commit()
+                set_span_attributes(
+                    span,
+                    transcript_chars=len(result.transcript),
+                    audio_seconds=result.audio_seconds,
+                    provider_item_id=result.item_id,
+                )
         except TimeoutError:
             await self.emit(EventType.PIPELINE_STAGE_TIMEOUT, "stt")
             raise
@@ -252,7 +293,16 @@ class StreamModule:
         first = True
         response_parts: list[str] = []
         try:
-            with tracer.start_as_current_span("pipeline.llm"):
+            with tracer.start_as_current_span("pipeline.llm") as span:
+                set_span_attributes(
+                    span,
+                    call_id=self.call_id,
+                    turn_id=self.state.turn_id,
+                    stage="llm",
+                    provider=self.llm.name,
+                    model=self.llm.model,
+                    transcript_chars=len(transcript),
+                )
                 async for token in generate_tokens(self.llm, transcript, {"call_id": self.call_id}):
                     if first:
                         first = False
@@ -262,6 +312,11 @@ class StreamModule:
                     self._set_queue_depth("llm_to_tts", queue.depth)
                     await self._send_pipeline_state()
                     await self.transport.send_json("llm.token", text=token)
+                set_span_attributes(
+                    span,
+                    response_chars=sum(len(part) for part in response_parts),
+                    max_queue_depth=max(self.state.queue_depths.get("llm_to_tts", 0), 0),
+                )
         except Exception as exc:
             await self._provider_failed("llm", self.llm.name, exc)
             raise
@@ -351,14 +406,33 @@ class StreamModule:
         audio_queue: BackpressureController[bytes | None],
         first_audio: bool,
     ) -> bool:
-        with tracer.start_as_current_span("pipeline.tts"):
+        with tracer.start_as_current_span("pipeline.tts") as span:
+            set_span_attributes(
+                span,
+                call_id=self.call_id,
+                turn_id=self.state.turn_id,
+                stage="tts",
+                provider=self.tts.name,
+                model=self.tts.model,
+                phrase_chars=len(phrase),
+            )
+            audio_bytes = 0
+            chunks = 0
             async for audio in synthesize_audio(self.tts, phrase):
                 if first_audio:
                     first_audio = False
                     await self.emit(EventType.TTS_FIRST_AUDIO, "tts")
                 await audio_queue.put(audio)
+                audio_bytes += len(audio)
+                chunks += 1
                 self._set_queue_depth("tts_to_transport", audio_queue.depth)
                 await self._send_pipeline_state()
+            set_span_attributes(
+                span,
+                audio_bytes=audio_bytes,
+                audio_chunks=chunks,
+                queue_depth=audio_queue.depth,
+            )
         usage = self.tts.consume_usage()
         await self.emit(
             EventType.USAGE_TTS_RECORDED,
@@ -412,11 +486,21 @@ class StreamModule:
         self.state.corked = corked
         self.state.cork_reason = reason if corked else None
         event_type = EventType.PIPELINE_CORKED if corked else EventType.PIPELINE_UNCORKED
-        await self.emit(
-            event_type,
-            "backpressure",
-            payload={"reason": reason, "queue_depth": depth},
-        )
+        with tracer.start_as_current_span("pipeline.backpressure") as span:
+            set_span_attributes(
+                span,
+                call_id=self.call_id,
+                turn_id=self.state.turn_id,
+                stage="backpressure",
+                corked=corked,
+                reason=reason,
+                queue_depth=depth,
+            )
+            await self.emit(
+                event_type,
+                "backpressure",
+                payload={"reason": reason, "queue_depth": depth},
+            )
         await self.transport.send_json(
             str(event_type), corked=corked, reason=reason, queue_depths=self.state.queue_depths
         )

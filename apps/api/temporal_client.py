@@ -5,6 +5,7 @@ from temporalio.client import Client, WorkflowHandle
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from apps.api.config import Settings
+from apps.api.telemetry.tracing import inject_trace_context
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ class TemporalLifecycleClient:
             return
         handle = self._handles.get(call_id) or self.client.get_workflow_handle(f"call-{call_id}")
         self._handles[call_id] = handle
-        await handle.signal(signal_name, event)
+        await handle.signal(signal_name, inject_trace_context(event))
 
     async def health(self) -> bool:
         if not self.client:
@@ -52,4 +53,3 @@ class TemporalLifecycleClient:
             return True
         except Exception:
             return False
-

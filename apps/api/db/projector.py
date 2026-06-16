@@ -3,10 +3,14 @@ from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
 
 import asyncpg
+from opentelemetry import trace
 
 from apps.api.db.repository import PostgresRepository
 from apps.api.events.schemas import EventType, PipelineEvent
 from apps.api.telemetry.metrics import DUPLICATE_EVENTS
+from apps.api.telemetry.tracing import set_span_attributes
+
+tracer = trace.get_tracer(__name__)
 
 
 class EventProjector:
@@ -46,7 +50,20 @@ class EventProjector:
                 await self._project_usage(connection, event)
                 return True
 
-        return await self._repository._retry(operation, critical=True)
+        with tracer.start_as_current_span("postgres.project_event") as span:
+            set_span_attributes(
+                span,
+                call_id=event.call_id,
+                turn_id=event.turn_id,
+                event_id=str(event.event_id),
+                event_type=str(event.event_type),
+                stage=event.stage,
+                sequence_number=event.sequence_number,
+                idempotency_key=event.idempotency_key,
+            )
+            result = await self._repository._retry(operation, critical=True)
+            set_span_attributes(span, duplicate_event=result is False)
+            return result
 
     async def _insert_event(
         self, connection: asyncpg.Connection, event: PipelineEvent

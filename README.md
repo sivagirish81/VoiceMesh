@@ -167,7 +167,8 @@ Open:
 4. Speak, then pause for roughly 700 ms.
 5. Watch partial STT text arrive while PCM is still streaming, then the final turn,
    LLM tokens, TTS audio, and browser playback.
-6. Search the call trace in Jaeger under `voicemesh-api`.
+6. Open Jaeger, select `voicemesh-api`, filter operation `voice.call`, or paste the
+   trace ID shown on the call detail page.
 
 The browser sends signed 16-bit PCM chunks. VAD measures real sample amplitude rather
 than using a timer. WebRTC VAD or Silero is the production migration path.
@@ -266,8 +267,17 @@ registry and compatibility checks. Topics currently include `call-events`,
 ## Observability
 
 The local stack instruments FastAPI, WebSocket operations, VAD, providers, queues,
-Kafka, Postgres, and Temporal activities. Production tracing should propagate W3C
-context through Kafka and workflow boundaries and add webhook/tool spans.
+Kafka, Postgres, and Temporal activities. The POC now propagates W3C trace context
+through Kafka headers so API publishes, event-worker consumes, and Postgres projections
+can appear in one call trace. Temporal lifecycle signals also carry safe trace context
+to activities, though production Temporal propagation should use interceptors.
+
+Jaeger stores local traces in a Badger-backed `jaeger-data` Compose volume instead of
+pure memory, and FastAPI `/metrics` is excluded from tracing so Prometheus scrapes do
+not bury the useful call traces. A good call trace under `voicemesh-api` should include
+`voice.call`, `pipeline.vad`, `pipeline.stt`, `pipeline.llm`, `pipeline.tts`,
+`kafka.publish`, downstream `kafka.consume`, `postgres.project_event`, and relevant
+`temporal.activity.*` spans.
 
 The primary latency SLI is end-of-speech to first audible agent audio. Component metrics
 should include STT final latency, LLM time to first token, TTS time to first audio byte,

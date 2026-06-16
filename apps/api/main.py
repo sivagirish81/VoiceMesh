@@ -104,7 +104,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         await pipeline.run()
 
-    FastAPIInstrumentor.instrument_app(application)
+    FastAPIInstrumentor.instrument_app(application, excluded_urls="/metrics")
     return application
 
 
