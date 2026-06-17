@@ -64,6 +64,7 @@ class StreamModule:
         self._closed = False
         self._failed = False
         self._call_started_at = time.monotonic()
+        self._usage_expectations: dict[str, set[str]] = {}
 
     async def run(self) -> None:
         ACTIVE_CALLS.inc()
@@ -245,6 +246,7 @@ class StreamModule:
                 ],
             },
         )
+        self._expect_usage(turn_id, "stt_audio_seconds")
         return result.transcript
 
     async def _on_stt_delta(self, delta: str) -> None:
@@ -360,6 +362,8 @@ class StreamModule:
                 ],
             },
         )
+        self._expect_usage(self.state.turn_id, "llm_input_tokens")
+        self._expect_usage(self.state.turn_id, "llm_output_tokens")
 
     async def _consume_tts(
         self,
@@ -458,6 +462,8 @@ class StreamModule:
                 ],
             },
         )
+        self._expect_usage(self.state.turn_id, "tts_characters")
+        self._expect_usage(self.state.turn_id, "tts_audio_seconds")
         return first_audio
 
     async def _consume_transport(
@@ -507,6 +513,27 @@ class StreamModule:
 
     def _set_queue_depth(self, stage: str, depth: int) -> None:
         self.state.queue_depths[stage] = depth
+
+    def _expect_usage(self, turn_id: str, usage_type: str) -> None:
+        if turn_id == "session":
+            return
+        self._usage_expectations.setdefault(turn_id, set()).add(usage_type)
+
+    def _usage_manifest_payload(self) -> dict[str, Any]:
+        expected_turns = [
+            {
+                "turn_id": turn_id,
+                "expected_usage": sorted(expected_usage),
+            }
+            for turn_id, expected_usage in sorted(self._usage_expectations.items())
+            if expected_usage
+        ]
+        return {
+            "tenant_id": "local-demo-tenant",
+            "assistant_id": "local-demo-assistant",
+            "pricing_version": self.settings.billing_pricing_version,
+            "expected_turns": expected_turns,
+        }
 
     async def _send_pipeline_state(self) -> None:
         await self.transport.send_json(
@@ -581,6 +608,12 @@ class StreamModule:
         if self._failed:
             return
         with suppress(Exception):
+            await self.emit(
+                EventType.USAGE_FINALIZATION_BARRIER,
+                "billing",
+                turn_id="session",
+                payload=self._usage_manifest_payload(),
+            )
             await self.emit(
                 EventType.CALL_ENDED,
                 "transport",

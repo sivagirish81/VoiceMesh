@@ -233,10 +233,15 @@ Temporal also owns the durable billing and delivery outer loop:
 ```mermaid
 flowchart LR
     Ended["call.ended"] --> Kafka["Kafka"]
-    Kafka --> UsageWriter["UsageWriter / Event Worker"]
-    UsageWriter --> PG["Postgres usage rows"]
-    UsageWriter -->|"UsageRecorded signal"| Billing["BillingFinalizationWorkflow"]
+    Session["Session Worker"] --> Barrier["usage.finalization_barrier"]
+    Barrier --> Kafka
+    Kafka --> UsageWriter["Batched UsageWriter / Event Worker"]
+    UsageWriter --> PG["Postgres usage rows + manifest"]
+    UsageWriter --> Watermark["projection_watermarks"]
+    UsageWriter -->|"UsageProjectionUpdated hint"| Billing["BillingFinalizationWorkflow"]
+    Billing -->|"waits for manifest + watermark + expected usage"| PG
     Billing --> Final["final_call_billing_records"]
+    UsageWriter -->|"late usage after finalization"| Adjustment["BillingAdjustmentWorkflow"]
     Billing --> Event["billing.finalized"]
     Completion["CallCompletionWorkflow"] --> Webhook["WebhookDeliveryWorkflow"]
 ```

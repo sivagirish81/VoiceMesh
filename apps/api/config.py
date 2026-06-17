@@ -32,10 +32,13 @@ class Settings(BaseSettings):
     billing_platform_rate_per_minute_usd: float = Field(default=0.05, ge=0)
     billing_pricing_version: str = "openai-2026-06-15+voicemesh-lab-v1"
     billing_required_usage_types: str = (
-        "stt_audio_seconds,llm_input_tokens,llm_output_tokens,tts_characters"
+        "stt_audio_seconds,llm_input_tokens,llm_output_tokens,tts_characters,tts_audio_seconds"
     )
     billing_usage_wait_seconds: int = Field(default=20, ge=1)
+    billing_usage_settle_seconds: int = Field(default=3, ge=0)
     billing_missing_usage_policy: str = "FINALIZED_WITH_WARNINGS"
+    kafka_consumer_batch_size: int = Field(default=100, ge=1)
+    kafka_consumer_batch_timeout_ms: int = Field(default=500, ge=1)
     durable_action_default_timeout_seconds: int = Field(default=3600, ge=1)
     webhook_max_attempts: int = Field(default=5, ge=1)
     webhook_backoff_seconds: int = Field(default=2, ge=0)

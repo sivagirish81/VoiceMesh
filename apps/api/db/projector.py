@@ -1,4 +1,5 @@
 import json
+from dataclasses import dataclass, field
 from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
 
@@ -6,11 +7,22 @@ import asyncpg
 from opentelemetry import trace
 
 from apps.api.db.repository import PostgresRepository
+from apps.api.events.kafka_consumer import ConsumedEvent
 from apps.api.events.schemas import EventType, PipelineEvent
 from apps.api.telemetry.metrics import DUPLICATE_EVENTS
 from apps.api.telemetry.tracing import set_span_attributes
 
 tracer = trace.get_tracer(__name__)
+
+
+@dataclass
+class ProjectionBatchResult:
+    inserted_events: list[PipelineEvent] = field(default_factory=list)
+    duplicate_events: list[PipelineEvent] = field(default_factory=list)
+    usage_projection_call_ids: set[str] = field(default_factory=set)
+    late_usage_call_ids: set[str] = field(default_factory=set)
+    late_usage_events: list[PipelineEvent] = field(default_factory=list)
+    call_ended_events: list[PipelineEvent] = field(default_factory=list)
 
 
 class EventProjector:
@@ -29,26 +41,7 @@ class EventProjector:
         async def operation() -> bool:
             pool = self._repository._require_pool()
             async with pool.acquire() as connection, connection.transaction():
-                inserted = await connection.fetchval(
-                    """
-                    INSERT INTO idempotency_keys (idempotency_key, call_id, event_type)
-                    VALUES ($1, $2, $3)
-                    ON CONFLICT (idempotency_key) DO NOTHING
-                    RETURNING TRUE
-                    """,
-                    event.idempotency_key,
-                    event.call_id,
-                    str(event.event_type),
-                )
-                if not inserted:
-                    DUPLICATE_EVENTS.labels(str(event.event_type)).inc()
-                    return False
-
-                await self._insert_event(connection, event)
-                await self._project_call(connection, event)
-                await self._project_metric(connection, event)
-                await self._project_usage(connection, event)
-                return True
+                return await self._project_one(connection, event)
 
         with tracer.start_as_current_span("postgres.project_event") as span:
             set_span_attributes(
@@ -64,6 +57,123 @@ class EventProjector:
             result = await self._repository._retry(operation, critical=True)
             set_span_attributes(span, duplicate_event=result is False)
             return result
+
+    async def project_batch(
+        self,
+        consumed_events: list[ConsumedEvent],
+        *,
+        consumer_group: str,
+    ) -> ProjectionBatchResult | None:
+        async def operation() -> ProjectionBatchResult:
+            result = ProjectionBatchResult()
+            pool = self._repository._require_pool()
+            async with pool.acquire() as connection, connection.transaction():
+                watermarks: dict[tuple[str, int], int] = {}
+                for item in consumed_events:
+                    event = item.event
+                    inserted = await self._project_one(
+                        connection,
+                        event,
+                        topic=item.topic,
+                        partition=item.partition,
+                        offset=item.offset,
+                    )
+                    watermarks[(item.topic, item.partition)] = max(
+                        watermarks.get((item.topic, item.partition), -1),
+                        item.offset,
+                    )
+                    if inserted:
+                        result.inserted_events.append(event)
+                        if event.event_type == EventType.CALL_ENDED:
+                            result.call_ended_events.append(event)
+                        if str(event.event_type).startswith("usage."):
+                            result.usage_projection_call_ids.add(event.call_id)
+                            if event.event_type != EventType.USAGE_FINALIZATION_BARRIER:
+                                finalized = await connection.fetchval(
+                                    """
+                                    SELECT TRUE FROM final_call_billing_records
+                                    WHERE call_id=$1
+                                    """,
+                                    event.call_id,
+                                )
+                                if finalized:
+                                    result.late_usage_call_ids.add(event.call_id)
+                                    result.late_usage_events.append(event)
+                    else:
+                        result.duplicate_events.append(event)
+
+                for (topic, partition), offset in watermarks.items():
+                    await connection.execute(
+                        """
+                        INSERT INTO projection_watermarks (
+                            consumer_group, topic, partition, last_projected_offset
+                        ) VALUES ($1,$2,$3,$4)
+                        ON CONFLICT (consumer_group, topic, partition) DO UPDATE SET
+                            last_projected_offset=GREATEST(
+                                projection_watermarks.last_projected_offset,
+                                EXCLUDED.last_projected_offset
+                            ),
+                            updated_at=NOW()
+                        """,
+                        consumer_group,
+                        topic,
+                        partition,
+                        offset,
+                    )
+                return result
+
+        with tracer.start_as_current_span("postgres.project_batch") as span:
+            set_span_attributes(
+                span,
+                batch_size=len(consumed_events),
+                consumer_group=consumer_group,
+            )
+            result = await self._repository._retry(operation, critical=True)
+            if result:
+                set_span_attributes(
+                    span,
+                    inserted_count=len(result.inserted_events),
+                    duplicate_count=len(result.duplicate_events),
+                    affected_usage_calls=len(result.usage_projection_call_ids),
+                    late_usage_calls=len(result.late_usage_call_ids),
+                )
+            return result
+
+    async def _project_one(
+        self,
+        connection: asyncpg.Connection,
+        event: PipelineEvent,
+        *,
+        topic: str | None = None,
+        partition: int | None = None,
+        offset: int | None = None,
+    ) -> bool:
+        inserted = await connection.fetchval(
+            """
+            INSERT INTO idempotency_keys (idempotency_key, call_id, event_type)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (idempotency_key) DO NOTHING
+            RETURNING TRUE
+            """,
+            event.idempotency_key,
+            event.call_id,
+            str(event.event_type),
+        )
+        if not inserted:
+            DUPLICATE_EVENTS.labels(str(event.event_type)).inc()
+            return False
+
+        await self._insert_event(connection, event)
+        await self._project_call(connection, event)
+        await self._project_metric(connection, event)
+        await self._project_usage(
+            connection,
+            event,
+            topic=topic,
+            partition=partition,
+            offset=offset,
+        )
+        return True
 
     async def _insert_event(
         self, connection: asyncpg.Connection, event: PipelineEvent
@@ -211,9 +321,24 @@ class EventProjector:
         )
 
     async def _project_usage(
-        self, connection: asyncpg.Connection, event: PipelineEvent
+        self,
+        connection: asyncpg.Connection,
+        event: PipelineEvent,
+        *,
+        topic: str | None = None,
+        partition: int | None = None,
+        offset: int | None = None,
     ) -> None:
         if not str(event.event_type).startswith("usage."):
+            return
+        if event.event_type == EventType.USAGE_FINALIZATION_BARRIER:
+            await self._project_usage_manifest(
+                connection,
+                event,
+                topic=topic or "usage-events",
+                partition=partition if partition is not None else -1,
+                offset=offset if offset is not None else -1,
+            )
             return
         provider = str(event.payload["provider"])
         model = str(event.payload["model"])
@@ -310,6 +435,65 @@ class EventProjector:
         )
         await self._enqueue_billing_event(connection, event, billing)
 
+    async def _project_usage_manifest(
+        self,
+        connection: asyncpg.Connection,
+        event: PipelineEvent,
+        *,
+        topic: str,
+        partition: int,
+        offset: int,
+    ) -> None:
+        tenant_id = str(event.payload.get("tenant_id", "local-demo-tenant"))
+        assistant_id = str(event.payload.get("assistant_id", "local-demo-assistant"))
+        expected_turns = event.payload.get("expected_turns", [])
+        await connection.execute(
+            """
+            INSERT INTO call_usage_manifests (
+                call_id, tenant_id, assistant_id, event_id, barrier_topic,
+                barrier_partition, barrier_offset, expected_turns, trace_id, created_at
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10)
+            ON CONFLICT (call_id) DO UPDATE SET
+                event_id=EXCLUDED.event_id,
+                barrier_topic=EXCLUDED.barrier_topic,
+                barrier_partition=EXCLUDED.barrier_partition,
+                barrier_offset=EXCLUDED.barrier_offset,
+                expected_turns=EXCLUDED.expected_turns,
+                trace_id=COALESCE(EXCLUDED.trace_id, call_usage_manifests.trace_id),
+                updated_at=NOW()
+            """,
+            event.call_id,
+            tenant_id,
+            assistant_id,
+            event.event_id,
+            topic,
+            partition,
+            offset,
+            json.dumps(expected_turns),
+            event.trace_id,
+            event.timestamp,
+        )
+        for turn in expected_turns:
+            turn_id = str(turn.get("turn_id", ""))
+            if not turn_id:
+                continue
+            for usage_type in turn.get("expected_usage", []):
+                normalized = str(usage_type)
+                await connection.execute(
+                    """
+                    INSERT INTO call_usage_expectations (
+                        call_id, tenant_id, assistant_id, turn_id, usage_type, source_stage
+                    ) VALUES ($1,$2,$3,$4,$5,$6)
+                    ON CONFLICT (call_id, turn_id, usage_type) DO NOTHING
+                    """,
+                    event.call_id,
+                    tenant_id,
+                    assistant_id,
+                    turn_id,
+                    normalized,
+                    self._stage_for_usage_type(normalized),
+                )
+
     def _normalized_usage_type(self, usage_type: str, stage: str) -> str:
         mapping = {
             "audio_minute": "stt_audio_seconds" if stage == "stt" else "call_duration_seconds",
@@ -320,6 +504,17 @@ class EventProjector:
             "output_audio_token": "tts_audio_seconds",
         }
         return mapping.get(usage_type, usage_type)
+
+    def _stage_for_usage_type(self, usage_type: str) -> str:
+        if usage_type.startswith("stt_"):
+            return "stt"
+        if usage_type.startswith("llm_"):
+            return "llm"
+        if usage_type.startswith("tts_"):
+            return "tts"
+        if usage_type.startswith("telephony_"):
+            return "telephony"
+        return "usage"
 
     async def _update_usage_rollup(
         self,

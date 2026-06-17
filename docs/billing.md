@@ -11,8 +11,11 @@ flowchart LR
     STT["Streaming STT adapter"] -->|"audio duration"| Usage["usage-events"]
     LLM["LLM adapter"] -->|"provider token usage"| Usage
     TTS["TTS adapter"] -->|"text + PCM duration estimates"| Usage
-    Usage --> Worker["Kafka event worker"]
-    Worker -->|"idempotent transaction"| Records["Postgres usage_records"]
+    Barrier["usage.finalization_barrier"] --> Usage
+    Usage --> Worker["UsageWriter / Kafka event worker"]
+    Worker -->|"batched idempotent transaction"| Records["Postgres usage_records"]
+    Worker --> Manifest["manifest + expectations"]
+    Worker --> Watermark["projection_watermarks"]
     Catalog["pricing_catalog"] --> Worker
     Worker --> Rollup["Postgres call_billing"]
     Worker --> Outbox["Postgres outbox_events"]
@@ -23,9 +26,11 @@ flowchart LR
 ```
 
 The session worker emits usage measurements to Kafka. It does not calculate or write
-the durable bill. The event worker consumes those events, inserts the idempotency key
-and usage rows, applies the price catalog, updates the call rollup, and creates a
-`billing.usage_recorded` outbox event in one database transaction.
+the durable bill. At call end it emits `usage.finalization_barrier`, also keyed by
+`call_id` on `usage-events`, so the barrier is ordered behind prior usage events for the
+same call. The event worker consumes in bounded batches, inserts idempotency keys and
+usage rows, applies the price catalog, updates rollups, stores the manifest/expectations,
+and advances projection watermarks in one database transaction.
 
 ## Metered Units
 
@@ -48,7 +53,12 @@ catalog uses the version `openai-2026-06-15`, while
 
 - `pricing_catalog`: versioned unit prices by provider, model, and usage type.
 - `usage_records`: immutable priced measurements, unique by source event and usage type.
+- `call_usage_manifests`: finalization barrier metadata and expected turns.
+- `call_usage_expectations`: expected per-turn usage facts used by billing readiness.
+- `projection_watermarks`: last projected Kafka offset by consumer group/topic/partition.
 - `call_billing`: per-call duration, provider cost, platform fee, total, and status.
+- `final_call_billing_records`: finalized invoice-like snapshot for a call.
+- `billing_adjustments`: immutable late-usage adjustments after finalization.
 - `outbox_events`: billing notifications waiting for Kafka publication.
 
 The dashboard reads:
@@ -67,6 +77,12 @@ If Postgres is unavailable, the consumer does not commit the failed Kafka offset
 bounded retries it recreates the consumer and replays the event when the database
 returns. If Kafka publication of the DB-derived billing event fails, its outbox row
 remains unpublished and is retried.
+
+Batching is bounded by count and time. Locally the defaults are
+`KAFKA_CONSUMER_BATCH_SIZE=100` and `KAFKA_CONSUMER_BATCH_TIMEOUT_MS=500`, and a
+`usage.finalization_barrier` forces the current batch to be projected promptly. Billing
+may start before usage is visible in Postgres, but Temporal waits for the manifest,
+projection watermark, and per-turn expectations before finalization.
 
 ## Local Pricing Caveats
 

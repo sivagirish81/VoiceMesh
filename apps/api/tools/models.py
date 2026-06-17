@@ -25,6 +25,8 @@ class DurableActionState(StrEnum):
 
 class BillingWorkflowState(StrEnum):
     WAITING_FOR_CALL_END = "WAITING_FOR_CALL_END"
+    WAITING_FOR_MANIFEST = "WAITING_FOR_MANIFEST"
+    WAITING_FOR_PROJECTION = "WAITING_FOR_PROJECTION"
     WAITING_FOR_USAGE = "WAITING_FOR_USAGE"
     FINALIZING = "FINALIZING"
     FINALIZED = "FINALIZED"
@@ -94,8 +96,10 @@ class BillingFinalizationInput(BaseModel):
     call_id: str
     required_usage_types: list[str]
     wait_timeout_seconds: int = 20
+    settle_seconds: int = 3
     missing_usage_policy: BillingWorkflowState = BillingWorkflowState.FINALIZED_WITH_WARNINGS
     pricing_version: str = "local-demo-v1"
+    consumer_group: str = "voicemesh-postgres-projector-v1"
     trace_id: str | None = None
 
 
@@ -103,6 +107,9 @@ class BillingStatus(BaseModel):
     state: BillingWorkflowState
     present_usage_types: list[str] = Field(default_factory=list)
     missing_usage_types: list[str] = Field(default_factory=list)
+    manifest_present: bool = False
+    projection_caught_up: bool = False
+    missing_expectations: list[str] = Field(default_factory=list)
     total_cost_cents: int | None = None
     warnings: list[str] = Field(default_factory=list)
 

@@ -7,6 +7,7 @@ from apps.api.config import get_settings
 from apps.api.telemetry.tracing import configure_tracing
 from apps.worker.activities import (
     cancel_external_action,
+    create_billing_adjustment,
     create_external_action,
     deliver_webhook,
     emit_recovery_event,
@@ -24,6 +25,7 @@ from apps.worker.activities import (
     summarize_call,
 )
 from apps.worker.durable_workflows import (
+    BillingAdjustmentWorkflow,
     BillingFinalizationWorkflow,
     CallCompletionWorkflow,
     DurableActionWorkflow,
@@ -45,6 +47,7 @@ async def run_worker() -> None:
             CallWorkflow,
             DurableActionWorkflow,
             BillingFinalizationWorkflow,
+            BillingAdjustmentWorkflow,
             WebhookDeliveryWorkflow,
             CallCompletionWorkflow,
         ],
@@ -60,6 +63,7 @@ async def run_worker() -> None:
             create_external_action,
             cancel_external_action,
             get_external_action_status,
+            create_billing_adjustment,
             load_billing_readiness,
             finalize_call_billing,
             emit_workflow_event,
