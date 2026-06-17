@@ -34,6 +34,12 @@ export type BillingCall = {
   provider_cost_usd: string | number;
   platform_fee_usd: string | number;
   total_cost_usd: string | number;
+  platform_cost_cents?: string | number;
+  stt_cost_cents?: string | number;
+  llm_cost_cents?: string | number;
+  tts_cost_cents?: string | number;
+  telephony_cost_cents?: string | number;
+  total_cost_cents?: string | number;
   currency: string;
   status: string;
   call_status?: string;

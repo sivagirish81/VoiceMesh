@@ -45,6 +45,79 @@ class TemporalLifecycleClient:
         self._handles[call_id] = handle
         await handle.signal(signal_name, inject_trace_context(event))
 
+    async def start_durable_action(self, input_data: dict[str, Any]) -> str:
+        if not self.client:
+            raise RuntimeError("Temporal client not connected")
+        workflow_id = f"tool-{input_data['tool_invocation_id']}"
+        try:
+            await self.client.start_workflow(
+                "DurableActionWorkflow",
+                inject_trace_context(input_data),
+                id=workflow_id,
+                task_queue=self._settings.temporal_task_queue,
+            )
+        except WorkflowAlreadyStartedError:
+            pass
+        return workflow_id
+
+    async def signal_durable_action(
+        self,
+        tool_invocation_id: str,
+        signal_name: str,
+        event: dict[str, Any],
+    ) -> None:
+        if not self.client:
+            logger.warning("Temporal unavailable; durable action signal skipped")
+            return
+        handle = self.client.get_workflow_handle(f"tool-{tool_invocation_id}")
+        await handle.signal(signal_name, inject_trace_context(event))
+
+    async def start_billing_finalization(
+        self,
+        call_id: str,
+        input_data: dict[str, Any],
+    ) -> str:
+        if not self.client:
+            raise RuntimeError("Temporal client not connected")
+        workflow_id = f"billing-{call_id}"
+        try:
+            await self.client.start_workflow(
+                "BillingFinalizationWorkflow",
+                inject_trace_context(input_data),
+                id=workflow_id,
+                task_queue=self._settings.temporal_task_queue,
+            )
+        except WorkflowAlreadyStartedError:
+            pass
+        return workflow_id
+
+    async def signal_billing(
+        self,
+        call_id: str,
+        signal_name: str,
+        event: dict[str, Any],
+    ) -> None:
+        if not self.client:
+            logger.warning("Temporal unavailable; billing signal skipped")
+            return
+        handle = self.client.get_workflow_handle(f"billing-{call_id}")
+        await handle.signal(signal_name, inject_trace_context(event))
+
+    async def start_webhook_delivery(self, input_data: dict[str, Any]) -> str:
+        if not self.client:
+            raise RuntimeError("Temporal client not connected")
+        workflow_id = f"webhook-{input_data['webhook_delivery_id']}"
+        try:
+            await self.client.start_workflow(
+                "WebhookDeliveryWorkflow",
+                inject_trace_context(input_data),
+                id=workflow_id,
+                task_queue=self._settings.temporal_task_queue,
+            )
+        except WorkflowAlreadyStartedError:
+            pass
+        return workflow_id
+
     async def health(self) -> bool:
         if not self.client:
             return False

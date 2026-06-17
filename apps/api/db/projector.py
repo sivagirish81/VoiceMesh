@@ -266,11 +266,93 @@ class EventProjector:
                 ),
                 event.timestamp,
             )
+            normalized_type = self._normalized_usage_type(usage_type, event.stage)
+            usage_event_id = uuid5(NAMESPACE_URL, f"voicemesh:usage:{event.event_id}:{usage_type}")
+            await connection.execute(
+                """
+                INSERT INTO call_usage_events (
+                    event_id, tenant_id, assistant_id, call_id, turn_id, usage_type,
+                    provider, model, quantity, unit, cost_basis_json, created_at
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12)
+                ON CONFLICT (event_id) DO NOTHING
+                """,
+                usage_event_id,
+                str(event.payload.get("tenant_id", "local-demo-tenant")),
+                str(event.payload.get("assistant_id", "local-demo-assistant")),
+                event.call_id,
+                event.turn_id,
+                normalized_type,
+                provider,
+                model,
+                quantity,
+                price["unit"],
+                json.dumps(
+                    {
+                        "source_usage_type": usage_type,
+                        "unit_price_usd": str(price["unit_price_usd"]),
+                        "cost_usd": str(cost),
+                        "pricing_version": price["pricing_version"],
+                    }
+                ),
+                event.timestamp,
+            )
+            await self._update_usage_rollup(
+                connection,
+                event.call_id,
+                str(event.payload.get("tenant_id", "local-demo-tenant")),
+                str(event.payload.get("assistant_id", "local-demo-assistant")),
+                normalized_type,
+                quantity,
+            )
 
         billing = await self._update_call_billing(
             connection, event.call_id, duration_seconds=None, finalized=False
         )
         await self._enqueue_billing_event(connection, event, billing)
+
+    def _normalized_usage_type(self, usage_type: str, stage: str) -> str:
+        mapping = {
+            "audio_minute": "stt_audio_seconds" if stage == "stt" else "call_duration_seconds",
+            "input_token": "llm_input_tokens",
+            "cached_input_token": "llm_input_tokens",
+            "output_token": "llm_output_tokens",
+            "input_text_token": "tts_characters",
+            "output_audio_token": "tts_audio_seconds",
+        }
+        return mapping.get(usage_type, usage_type)
+
+    async def _update_usage_rollup(
+        self,
+        connection: asyncpg.Connection,
+        call_id: str,
+        tenant_id: str,
+        assistant_id: str,
+        usage_type: str,
+        quantity: Decimal,
+    ) -> None:
+        columns = {
+            "stt_audio_seconds",
+            "llm_input_tokens",
+            "llm_output_tokens",
+            "tts_characters",
+            "tts_audio_seconds",
+            "telephony_seconds",
+        }
+        if usage_type not in columns:
+            return
+        await connection.execute(
+            f"""
+            INSERT INTO call_usage_rollups (call_id, tenant_id, assistant_id, {usage_type})
+            VALUES ($1,$2,$3,$4)
+            ON CONFLICT (call_id) DO UPDATE SET
+                {usage_type}=call_usage_rollups.{usage_type} + EXCLUDED.{usage_type},
+                updated_at=NOW()
+            """,
+            call_id,
+            tenant_id,
+            assistant_id,
+            quantity,
+        )
 
     async def _update_call_billing(
         self,

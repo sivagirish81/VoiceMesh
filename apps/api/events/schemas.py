@@ -36,6 +36,20 @@ class EventType(StrEnum):
     USAGE_LLM_RECORDED = "usage.llm"
     USAGE_TTS_RECORDED = "usage.tts"
     BILLING_USAGE_RECORDED = "billing.usage_recorded"
+    BILLING_FINALIZED = "billing.finalized"
+    TOOL_ACTION_REQUESTED = "tool.action.requested"
+    TOOL_ACTION_CREATE_STARTED = "tool.action.create_started"
+    TOOL_ACTION_ACCEPTED = "tool.action.accepted"
+    TOOL_ACTION_CANCEL_REQUESTED = "tool.action.cancel_requested"
+    TOOL_ACTION_CANCELLED = "tool.action.cancelled"
+    TOOL_ACTION_CANNOT_CANCEL = "tool.action.cannot_cancel"
+    TOOL_ACTION_COMPLETED = "tool.action.completed"
+    TOOL_ACTION_FAILED = "tool.action.failed"
+    TOOL_ACTION_TIMED_OUT = "tool.action.timed_out"
+    WEBHOOK_DELIVERY_REQUESTED = "webhook.delivery_requested"
+    WEBHOOK_DELIVERED = "webhook.delivered"
+    WEBHOOK_FAILED = "webhook.failed"
+    WORKFLOW_DONE = "workflow.done"
 
 
 class PipelineEvent(BaseModel):
@@ -90,6 +104,8 @@ TOPIC_BY_EVENT_PREFIX = {
     "workflow.": "call-events",
     "usage.": "usage-events",
     "billing.": "billing-events",
+    "tool.": "tool-events",
+    "webhook.": "webhook-events",
 }
 
 

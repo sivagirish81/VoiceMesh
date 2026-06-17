@@ -269,6 +269,20 @@ class PostgresRepository:
         totals = await pool.fetchrow(
             """
             SELECT
+                COALESCE(COUNT(f.call_id), 0) AS finalized_calls,
+                COALESCE(SUM(f.billable_seconds), 0) AS finalized_duration_seconds,
+                COALESCE(SUM(f.platform_cost_cents), 0) AS platform_cost_cents,
+                COALESCE(SUM(f.stt_cost_cents), 0) AS stt_cost_cents,
+                COALESCE(SUM(f.llm_cost_cents), 0) AS llm_cost_cents,
+                COALESCE(SUM(f.tts_cost_cents), 0) AS tts_cost_cents,
+                COALESCE(SUM(f.telephony_cost_cents), 0) AS telephony_cost_cents,
+                COALESCE(SUM(f.total_cost_cents), 0) AS total_cost_cents
+            FROM final_call_billing_records f
+            """
+        )
+        live_totals = await pool.fetchrow(
+            """
+            SELECT
                 COUNT(*) AS calls,
                 COALESCE(SUM(call_duration_seconds), 0) AS duration_seconds,
                 COALESCE(SUM(provider_cost_usd), 0) AS provider_cost_usd,
@@ -289,18 +303,41 @@ class PostgresRepository:
             """
         )
         return {
-            "totals": dict(totals) if totals else {},
+            "totals": {
+                **(dict(live_totals) if live_totals else {}),
+                **(dict(totals) if totals else {}),
+            },
             "usage": [dict(row) for row in stages],
         }
 
     async def list_billing_calls(self, limit: int = 100) -> list[dict[str, Any]]:
         rows = await self._require_pool().fetch(
             """
-            SELECT b.*, c.status AS call_status, c.started_at, c.ended_at,
+            SELECT
+                COALESCE(f.call_id, b.call_id) AS call_id,
+                COALESCE(f.billable_seconds, b.call_duration_seconds) AS call_duration_seconds,
+                COALESCE(
+                    (f.stt_cost_cents + f.llm_cost_cents + f.tts_cost_cents
+                        + f.telephony_cost_cents)::numeric / 100,
+                    b.provider_cost_usd,
+                    0
+                ) AS provider_cost_usd,
+                COALESCE(f.platform_cost_cents::numeric / 100, b.platform_fee_usd, 0)
+                    AS platform_fee_usd,
+                COALESCE(f.total_cost_cents::numeric / 100, b.total_cost_usd, 0)
+                    AS total_cost_usd,
+                COALESCE(f.currency, b.currency, 'USD') AS currency,
+                COALESCE(f.status, b.status) AS status,
+                COALESCE(f.pricing_version, b.pricing_version) AS pricing_version,
+                COALESCE(f.updated_at, b.updated_at) AS updated_at,
+                f.platform_cost_cents, f.stt_cost_cents, f.llm_cost_cents,
+                f.tts_cost_cents, f.telephony_cost_cents, f.total_cost_cents,
+                c.status AS call_status, c.started_at, c.ended_at,
                 c.selected_stt_model, c.selected_llm_model, c.selected_tts_model
             FROM call_billing b
+            FULL OUTER JOIN final_call_billing_records f USING (call_id)
             LEFT JOIN calls c USING (call_id)
-            ORDER BY b.updated_at DESC
+            ORDER BY updated_at DESC
             LIMIT $1
             """,
             limit,
@@ -311,11 +348,32 @@ class PostgresRepository:
         pool = self._require_pool()
         billing = await pool.fetchrow(
             """
-            SELECT b.*, c.status AS call_status, c.started_at, c.ended_at,
+            SELECT
+                COALESCE(f.call_id, b.call_id) AS call_id,
+                COALESCE(f.billable_seconds, b.call_duration_seconds) AS call_duration_seconds,
+                COALESCE(
+                    (f.stt_cost_cents + f.llm_cost_cents + f.tts_cost_cents
+                        + f.telephony_cost_cents)::numeric / 100,
+                    b.provider_cost_usd,
+                    0
+                ) AS provider_cost_usd,
+                COALESCE(f.platform_cost_cents::numeric / 100, b.platform_fee_usd, 0)
+                    AS platform_fee_usd,
+                COALESCE(f.total_cost_cents::numeric / 100, b.total_cost_usd, 0)
+                    AS total_cost_usd,
+                COALESCE(f.currency, b.currency, 'USD') AS currency,
+                COALESCE(f.status, b.status) AS status,
+                COALESCE(f.pricing_version, b.pricing_version) AS pricing_version,
+                COALESCE(f.updated_at, b.updated_at) AS updated_at,
+                f.platform_cost_cents, f.stt_cost_cents, f.llm_cost_cents,
+                f.tts_cost_cents, f.telephony_cost_cents, f.total_cost_cents,
+                f.warnings, f.finalized_at,
+                c.status AS call_status, c.started_at, c.ended_at,
                 c.selected_stt_model, c.selected_llm_model, c.selected_tts_model
             FROM call_billing b
+            FULL OUTER JOIN final_call_billing_records f USING (call_id)
             LEFT JOIN calls c USING (call_id)
-            WHERE b.call_id=$1
+            WHERE COALESCE(f.call_id, b.call_id)=$1
             """,
             call_id,
         )
@@ -340,7 +398,10 @@ class PostgresRepository:
     async def reset_demo(self) -> None:
         await self._require_pool().execute(
             """
-            TRUNCATE usage_records, call_billing, call_events, idempotency_keys,
+            TRUNCATE webhook_delivery_attempts, webhook_deliveries,
+                tool_invocation_attempts, tool_invocations,
+                final_call_billing_records, call_usage_rollups, call_usage_events,
+                usage_records, call_billing, call_events, idempotency_keys,
                 outbox_events, pipeline_metrics, calls
             """
         )

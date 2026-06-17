@@ -134,6 +134,131 @@ CREATE TABLE IF NOT EXISTS call_billing (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS tool_invocations (
+    id BIGSERIAL PRIMARY KEY,
+    tool_invocation_id TEXT NOT NULL UNIQUE,
+    tenant_id TEXT NOT NULL,
+    assistant_id TEXT NOT NULL,
+    call_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    execution_mode TEXT NOT NULL,
+    workflow_id TEXT UNIQUE,
+    external_request_id TEXT,
+    status TEXT NOT NULL,
+    arguments_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    result_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    last_error TEXT,
+    cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+    cancel_reason TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_tool_invocations_call
+    ON tool_invocations(call_id, created_at);
+
+CREATE TABLE IF NOT EXISTS tool_invocation_attempts (
+    attempt_id BIGSERIAL PRIMARY KEY,
+    tool_invocation_id TEXT NOT NULL,
+    activity_name TEXT NOT NULL,
+    attempt_number INTEGER NOT NULL DEFAULT 1,
+    request_url TEXT,
+    status_code INTEGER,
+    success BOOLEAN NOT NULL DEFAULT FALSE,
+    error TEXT,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_tool_invocation_attempts_tool
+    ON tool_invocation_attempts(tool_invocation_id, started_at);
+
+CREATE TABLE IF NOT EXISTS call_usage_events (
+    id BIGSERIAL PRIMARY KEY,
+    event_id UUID NOT NULL UNIQUE,
+    tenant_id TEXT NOT NULL,
+    assistant_id TEXT NOT NULL,
+    call_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    usage_type TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    quantity NUMERIC(24, 8) NOT NULL,
+    unit TEXT NOT NULL,
+    cost_basis_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_call_usage_events_call
+    ON call_usage_events(call_id, created_at);
+
+CREATE TABLE IF NOT EXISTS call_usage_rollups (
+    call_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    assistant_id TEXT NOT NULL,
+    stt_audio_seconds NUMERIC(24, 8) NOT NULL DEFAULT 0,
+    llm_input_tokens NUMERIC(24, 8) NOT NULL DEFAULT 0,
+    llm_output_tokens NUMERIC(24, 8) NOT NULL DEFAULT 0,
+    tts_characters NUMERIC(24, 8) NOT NULL DEFAULT 0,
+    tts_audio_seconds NUMERIC(24, 8) NOT NULL DEFAULT 0,
+    telephony_seconds NUMERIC(24, 8) NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'OPEN',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS final_call_billing_records (
+    call_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    assistant_id TEXT NOT NULL,
+    started_at TIMESTAMPTZ,
+    ended_at TIMESTAMPTZ,
+    billable_seconds INTEGER NOT NULL DEFAULT 0,
+    platform_cost_cents INTEGER NOT NULL DEFAULT 0,
+    stt_cost_cents INTEGER NOT NULL DEFAULT 0,
+    llm_cost_cents INTEGER NOT NULL DEFAULT 0,
+    tts_cost_cents INTEGER NOT NULL DEFAULT 0,
+    telephony_cost_cents INTEGER NOT NULL DEFAULT 0,
+    total_cost_cents INTEGER NOT NULL DEFAULT 0,
+    currency TEXT NOT NULL DEFAULT 'USD',
+    pricing_version TEXT NOT NULL,
+    status TEXT NOT NULL,
+    warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
+    finalized_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+    webhook_delivery_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    assistant_id TEXT NOT NULL,
+    call_id TEXT NOT NULL,
+    workflow_id TEXT UNIQUE,
+    target_url TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_status_code INTEGER,
+    last_error TEXT,
+    idempotency_key TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS webhook_delivery_attempts (
+    attempt_id BIGSERIAL PRIMARY KEY,
+    webhook_delivery_id TEXT NOT NULL,
+    attempt_number INTEGER NOT NULL,
+    status_code INTEGER,
+    success BOOLEAN NOT NULL DEFAULT FALSE,
+    error TEXT,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_webhook_delivery_attempts_delivery
+    ON webhook_delivery_attempts(webhook_delivery_id, attempt_number);
+
 INSERT INTO provider_configs (provider_type, provider_name, config)
 VALUES
     ('stt', 'openai', '{"model": "gpt-realtime-whisper"}'),
