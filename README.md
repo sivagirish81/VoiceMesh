@@ -109,9 +109,11 @@ See [docs/kafka_vs_temporal.md](docs/kafka_vs_temporal.md),
 
 ## Billing
 
-The event worker turns `usage.stt`, `usage.llm`, and `usage.tts` events into immutable
-`usage_records`, applies the versioned `pricing_catalog`, and rolls costs into
-`call_billing`. The bill is:
+The session worker emits `usage.stt`, `usage.llm`, and `usage.tts` during the call and a
+`usage.finalization_barrier` at call end. The event worker consumes Kafka in bounded
+batches, writes immutable `usage_records`, stores per-turn usage expectations, advances
+projection watermarks, applies the versioned `pricing_catalog`, and rolls costs into
+`call_billing`. The final bill is:
 
 `provider cost + configurable platform fee per call minute`
 
@@ -223,9 +225,10 @@ workflow immediately calls the cancel endpoint and persists `CANCELLED`.
 ### Billing Waits For Late TTS Usage
 
 `make demo-billing-late-tts` publishes call/usage events through Kafka. The event worker
-writes usage to Postgres and signals `BillingFinalizationWorkflow` only after the write
-succeeds. The workflow waits while TTS usage is missing, then finalizes after the late
-TTS usage event arrives.
+writes usage and the finalization barrier to Postgres, advances the projection watermark,
+and sends one coalesced `UsageProjectionUpdated` hint. The workflow waits for manifest,
+watermark, and expected turn usage before finalizing. Usage that appears after final
+billing starts `BillingAdjustmentWorkflow`.
 
 ## Commands
 

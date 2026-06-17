@@ -400,7 +400,9 @@ class PostgresRepository:
             """
             TRUNCATE webhook_delivery_attempts, webhook_deliveries,
                 tool_invocation_attempts, tool_invocations,
-                final_call_billing_records, call_usage_rollups, call_usage_events,
+                billing_adjustments, final_call_billing_records,
+                call_usage_expectations, call_usage_manifests,
+                projection_watermarks, call_usage_rollups, call_usage_events,
                 usage_records, call_billing, call_events, idempotency_keys,
                 outbox_events, pipeline_metrics, calls
             """

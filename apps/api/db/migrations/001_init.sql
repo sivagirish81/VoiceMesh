@@ -205,6 +205,43 @@ CREATE TABLE IF NOT EXISTS call_usage_rollups (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS call_usage_manifests (
+    call_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    assistant_id TEXT NOT NULL,
+    event_id UUID NOT NULL UNIQUE,
+    barrier_topic TEXT NOT NULL,
+    barrier_partition INTEGER NOT NULL,
+    barrier_offset BIGINT NOT NULL,
+    expected_turns JSONB NOT NULL DEFAULT '[]'::jsonb,
+    trace_id TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS call_usage_expectations (
+    id BIGSERIAL PRIMARY KEY,
+    call_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    assistant_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    usage_type TEXT NOT NULL,
+    source_stage TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(call_id, turn_id, usage_type)
+);
+CREATE INDEX IF NOT EXISTS idx_call_usage_expectations_call
+    ON call_usage_expectations(call_id, turn_id);
+
+CREATE TABLE IF NOT EXISTS projection_watermarks (
+    consumer_group TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    partition INTEGER NOT NULL,
+    last_projected_offset BIGINT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (consumer_group, topic, partition)
+);
+
 CREATE TABLE IF NOT EXISTS final_call_billing_records (
     call_id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -225,6 +262,22 @@ CREATE TABLE IF NOT EXISTS final_call_billing_records (
     finalized_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS billing_adjustments (
+    adjustment_id UUID PRIMARY KEY,
+    call_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    assistant_id TEXT NOT NULL,
+    previous_total_cost_cents INTEGER NOT NULL,
+    recomputed_total_cost_cents INTEGER NOT NULL,
+    delta_cost_cents INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    source_event_id UUID,
+    workflow_id TEXT,
+    status TEXT NOT NULL DEFAULT 'CREATED',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(call_id, source_event_id)
 );
 
 CREATE TABLE IF NOT EXISTS webhook_deliveries (

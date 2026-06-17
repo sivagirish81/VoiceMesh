@@ -26,6 +26,7 @@ INTERNAL_API = "http://api:8000"
 JAEGER = "http://localhost:16686"
 TEMPORAL_UI = "http://localhost:8080"
 OTEL = "http://localhost:4317"
+PRICING_VERSION = "openai-2026-06-15+voicemesh-lab-v1"
 
 tracer = trace.get_tracer(__name__)
 
@@ -295,9 +296,34 @@ async def main() -> None:
                 producer,
                 call_id,
                 "session",
+                EventType.USAGE_FINALIZATION_BARRIER,
+                "billing",
+                8,
+                {
+                    "tenant_id": TENANT_ID,
+                    "assistant_id": ASSISTANT_ID,
+                    "pricing_version": PRICING_VERSION,
+                    "expected_turns": [
+                        {
+                            "turn_id": "turn-refund-request",
+                            "expected_usage": [
+                                "stt_audio_seconds",
+                                "llm_input_tokens",
+                                "llm_output_tokens",
+                                "tts_characters",
+                                "tts_audio_seconds",
+                            ],
+                        }
+                    ],
+                },
+            )
+            await publish(
+                producer,
+                call_id,
+                "session",
                 EventType.CALL_ENDED,
                 "transport",
-                8,
+                9,
                 {
                     "tenant_id": TENANT_ID,
                     "assistant_id": ASSISTANT_ID,
@@ -318,7 +344,19 @@ async def main() -> None:
                 "gpt-4o-mini-tts",
                 "input_text_token",
                 60000,
-                9,
+                10,
+            )
+            await publish_usage(
+                producer,
+                call_id,
+                "turn-refund-request",
+                EventType.USAGE_TTS_RECORDED,
+                "tts",
+                "openai",
+                "gpt-4o-mini-tts",
+                "output_audio_token",
+                4800,
+                11,
             )
             billing_result = await billing_handle.result()
     finally:

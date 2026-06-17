@@ -17,6 +17,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from apps.worker.activities import (
         cancel_external_action,
+        create_billing_adjustment,
         create_external_action,
         deliver_webhook,
         emit_tool_event,
@@ -220,6 +221,10 @@ class BillingFinalizationWorkflow:
         self.call_ended = False
         self.present_usage_types: set[str] = set()
         self.missing_usage_types: set[str] = set()
+        self.missing_expectations: set[str] = set()
+        self.manifest_present = False
+        self.projection_caught_up = False
+        self.projection_update_count = 0
         self.warnings: list[str] = []
         self.total_cost_cents: int | None = None
         self.input_data: dict[str, Any] = {}
@@ -237,25 +242,45 @@ class BillingFinalizationWorkflow:
             )
             deadline = parsed.wait_timeout_seconds
             elapsed = 0
+            ready = False
             while elapsed <= deadline:
                 readiness = await workflow.execute_activity(
                     load_billing_readiness,
                     self.input_data,
                     start_to_close_timeout=timedelta(seconds=15),
                 )
+                self.manifest_present = bool(readiness.get("manifest_present"))
+                self.projection_caught_up = bool(readiness.get("projection_caught_up"))
                 self.present_usage_types = set(readiness.get("present_usage_types", []))
                 self.missing_usage_types = set(readiness.get("missing_usage_types", []))
-                if not self.missing_usage_types:
+                self.missing_expectations = set(readiness.get("missing_expectations", []))
+                ready = (
+                    self.manifest_present
+                    and self.projection_caught_up
+                    and not self.missing_usage_types
+                    and not self.missing_expectations
+                )
+                if ready:
                     break
-                self.state = BillingWorkflowState.WAITING_FOR_USAGE
+                if not self.manifest_present:
+                    self.state = BillingWorkflowState.WAITING_FOR_MANIFEST
+                elif not self.projection_caught_up:
+                    self.state = BillingWorkflowState.WAITING_FOR_PROJECTION
+                else:
+                    self.state = BillingWorkflowState.WAITING_FOR_USAGE
+                observed_updates = self.projection_update_count
+                wait_seconds = max(1, parsed.settle_seconds or 2)
                 try:
+                    def projection_updated(observed: int = observed_updates) -> bool:
+                        return self.projection_update_count > observed
+
                     await workflow.wait_condition(
-                        lambda: False,
-                        timeout=timedelta(seconds=2),
+                        projection_updated,
+                        timeout=timedelta(seconds=wait_seconds),
                     )
                 except TimeoutError:
                     pass
-                elapsed += 2
+                elapsed += wait_seconds
 
             self.state = BillingWorkflowState.FINALIZING
             result = await workflow.execute_activity(
@@ -263,9 +288,12 @@ class BillingFinalizationWorkflow:
                 {
                     **self.input_data,
                     "missing_usage_types": sorted(self.missing_usage_types),
+                    "missing_expectations": sorted(self.missing_expectations),
+                    "manifest_missing": not self.manifest_present,
+                    "projection_caught_up": self.projection_caught_up,
                     "status": str(
                         BillingWorkflowState.FINALIZED
-                        if not self.missing_usage_types
+                        if ready
                         else parsed.missing_usage_policy
                     ),
                 },
@@ -298,6 +326,11 @@ class BillingFinalizationWorkflow:
         usage_type = event.get("usage_type")
         if usage_type:
             self.present_usage_types.add(str(usage_type))
+        self.projection_update_count += 1
+
+    @workflow.signal(name="UsageProjectionUpdated")
+    async def usage_projection_updated(self, event: dict[str, Any]) -> None:
+        self.projection_update_count += 1
 
     @workflow.query(name="GetBillingState")
     def status(self) -> BillingStatus:
@@ -305,9 +338,37 @@ class BillingFinalizationWorkflow:
             state=self.state,
             present_usage_types=sorted(self.present_usage_types),
             missing_usage_types=sorted(self.missing_usage_types),
+            manifest_present=self.manifest_present,
+            projection_caught_up=self.projection_caught_up,
+            missing_expectations=sorted(self.missing_expectations),
             total_cost_cents=self.total_cost_cents,
             warnings=self.warnings,
         )
+
+
+@workflow.defn(name="BillingAdjustmentWorkflow")
+class BillingAdjustmentWorkflow:
+    @workflow.run
+    async def run(self, input_data: dict[str, Any]) -> dict[str, Any]:
+        result = cast(
+            dict[str, Any],
+            await workflow.execute_activity(
+                create_billing_adjustment,
+                {**input_data, "workflow_id": workflow.info().workflow_id},
+                start_to_close_timeout=timedelta(seconds=20),
+            ),
+        )
+        await workflow.execute_activity(
+            emit_workflow_event,
+            {
+                **input_data,
+                "event_type": "billing.adjustment_created",
+                "workflow_id": workflow.info().workflow_id,
+                "payload": result,
+            },
+            start_to_close_timeout=timedelta(seconds=15),
+        )
+        return result
 
 
 @workflow.defn(name="WebhookDeliveryWorkflow")

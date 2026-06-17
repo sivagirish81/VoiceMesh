@@ -103,6 +103,23 @@ class TemporalLifecycleClient:
         handle = self.client.get_workflow_handle(f"billing-{call_id}")
         await handle.signal(signal_name, inject_trace_context(event))
 
+    async def start_billing_adjustment(self, input_data: dict[str, Any]) -> str:
+        if not self.client:
+            raise RuntimeError("Temporal client not connected")
+        workflow_id = (
+            f"billing-adjustment-{input_data['call_id']}-{input_data['source_event_id']}"
+        )
+        try:
+            await self.client.start_workflow(
+                "BillingAdjustmentWorkflow",
+                inject_trace_context(input_data),
+                id=workflow_id,
+                task_queue=self._settings.temporal_task_queue,
+            )
+        except WorkflowAlreadyStartedError:
+            pass
+        return workflow_id
+
     async def start_webhook_delivery(self, input_data: dict[str, Any]) -> str:
         if not self.client:
             raise RuntimeError("Temporal client not connected")

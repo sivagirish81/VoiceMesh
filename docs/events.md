@@ -46,7 +46,8 @@ Recommended production events include:
 - `tool.action.requested`, `tool.action.accepted`, `tool.action.cancel_requested`,
   `tool.action.cancelled`, `tool.action.completed`, `tool.action.failed`
 - `webhook.delivery_requested`, `webhook.delivered`, `webhook.failed`
-- `billing.usage_recorded`, `billing.finalized`
+- `usage.finalization_barrier`, `billing.usage_recorded`, `billing.finalized`,
+  `billing.adjustment_created`
 
 VoiceMesh currently routes tool events to `tool-events`, webhook events to
 `webhook-events`, usage events to `usage-events`, and final billing events to
@@ -76,7 +77,7 @@ live browser WebSocket. Kafka receives LLM/TTS milestones and one aggregated
 
 ## Partitioning And Ordering
 
-Partition call events primarily by `call_id`. This preserves order for one call while
+Partition call and usage events primarily by `call_id`. This preserves order for one call while
 allowing calls from the same tenant to scale across partitions. `tenant_id` remains
 metadata for authorization, quotas, billing, retention, and observability; partitioning
 only by tenant can create hot partitions for large customers.
@@ -84,6 +85,12 @@ only by tenant can create hot partitions for large customers.
 Ordering is guaranteed only within a partition. Consumers must tolerate retries,
 duplicates, delayed events, and independent event types arriving from different
 producers.
+
+Billing finalization uses `usage.finalization_barrier` on `usage-events`, keyed by
+`call_id`, so the barrier is ordered behind prior usage events for that call on the same
+topic partition. The UsageWriter persists the barrier's consumed Kafka
+topic/partition/offset and advances `projection_watermarks` only after the DB projection
+transaction succeeds.
 
 ## Direct Kafka Versus Outbox
 
@@ -117,8 +124,8 @@ The same logical billing event is not also directly published by the session wor
 | `call-events` | call lifecycle and workflow state |
 | `pipeline-events` | VAD, STT/LLM/TTS milestones, backpressure, aggregated transport, duplicate/DB signals |
 | `provider-events` | provider failures and fallback selections |
-| `usage-events` | STT duration, LLM token usage, and TTS estimated usage |
-| `billing-events` | outbox-published billing rollup changes |
+| `usage-events` | STT duration, LLM token usage, TTS estimated usage, and finalization barriers |
+| `billing-events` | outbox-published billing rollup, finalized, and adjustment events |
 | `outbox-events` | reserved topic; the active outbox rows currently target their owned business topic |
 | `dead-letter-events` | fallback for unmapped contracts |
 

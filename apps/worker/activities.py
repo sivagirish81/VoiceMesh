@@ -3,7 +3,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, cast
-from uuid import uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import asyncpg
 import httpx
@@ -483,6 +483,43 @@ async def load_billing_readiness(data: dict[str, Any]) -> dict[str, Any]:
         "temporal.activity.load_billing_readiness",
         context=context_from_payload(data),
     ) as span:
+        manifest = await _fetchrow(
+            """
+            SELECT * FROM call_usage_manifests WHERE call_id=$1
+            """,
+            data["call_id"],
+        )
+        projection_caught_up = False
+        watermark: int | None = None
+        if manifest:
+            watermark_row = await _fetchrow(
+                """
+                SELECT last_projected_offset FROM projection_watermarks
+                WHERE consumer_group=$1 AND topic=$2 AND partition=$3
+                """,
+                data.get("consumer_group", "voicemesh-postgres-projector-v1"),
+                manifest["barrier_topic"],
+                manifest["barrier_partition"],
+            )
+            if watermark_row:
+                watermark = int(watermark_row["last_projected_offset"])
+                projection_caught_up = watermark >= int(manifest["barrier_offset"])
+        rows = await _fetch(
+            """
+            SELECT e.turn_id, e.usage_type
+            FROM call_usage_expectations e
+            LEFT JOIN call_usage_events u
+                ON u.call_id=e.call_id
+                AND u.turn_id=e.turn_id
+                AND u.usage_type=e.usage_type
+            WHERE e.call_id=$1 AND u.event_id IS NULL
+            ORDER BY e.turn_id, e.usage_type
+            """,
+            data["call_id"],
+        )
+        missing_expectations = [
+            f"{row['turn_id']}:{row['usage_type']}" for row in rows
+        ]
         rows = await _fetch(
             """
             SELECT usage_type FROM call_usage_events WHERE call_id=$1
@@ -503,16 +540,35 @@ async def load_billing_readiness(data: dict[str, Any]) -> dict[str, Any]:
         present = {str(row["usage_type"]) for row in rows}
         required = set(data.get("required_usage_types", []))
         missing = sorted(required - present)
+        final_billing = await _fetchrow(
+            "SELECT status,total_cost_cents FROM final_call_billing_records WHERE call_id=$1",
+            data["call_id"],
+        )
         set_span_attributes(
             span,
             call_id=data["call_id"],
-            billing_status="WAITING_FOR_USAGE" if missing else "READY",
+            billing_status="READY"
+            if manifest and projection_caught_up and not missing_expectations and not missing
+            else "WAITING",
+            manifest_present=bool(manifest),
+            projection_caught_up=projection_caught_up,
+            projection_watermark=watermark,
             present_usage_types=sorted(present),
             missing_usage_types=missing,
+            missing_expectations=missing_expectations,
         )
         return {
+            "manifest_present": bool(manifest),
+            "barrier_topic": manifest["barrier_topic"] if manifest else None,
+            "barrier_partition": manifest["barrier_partition"] if manifest else None,
+            "barrier_offset": manifest["barrier_offset"] if manifest else None,
+            "projection_watermark": watermark,
+            "projection_caught_up": projection_caught_up,
             "present_usage_types": sorted(present),
             "missing_usage_types": missing,
+            "missing_expectations": missing_expectations,
+            "final_billing_status": final_billing["status"] if final_billing else None,
+            "final_total_cost_cents": final_billing["total_cost_cents"] if final_billing else None,
         }
 
 
@@ -548,6 +604,14 @@ async def finalize_call_billing(data: dict[str, Any]) -> dict[str, Any]:
         warnings = [
             f"missing usage: {usage_type}" for usage_type in data.get("missing_usage_types", [])
         ]
+        warnings.extend(
+            f"missing expected turn usage: {item}"
+            for item in data.get("missing_expectations", [])
+        )
+        if data.get("manifest_missing"):
+            warnings.append("missing usage finalization barrier")
+        if not data.get("projection_caught_up", True):
+            warnings.append("usage projection watermark did not catch up before timeout")
         status = str(data["status"])
         await _execute(
             """
@@ -601,6 +665,79 @@ async def finalize_call_billing(data: dict[str, Any]) -> dict[str, Any]:
             "telephony_cost_cents": telephony_cost_cents,
             "total_cost_cents": total_cost_cents,
             "warnings": warnings,
+        }
+
+
+@activity.defn
+async def create_billing_adjustment(data: dict[str, Any]) -> dict[str, Any]:
+    with tracer.start_as_current_span(
+        "temporal.activity.create_billing_adjustment",
+        context=context_from_payload(data),
+    ) as span:
+        call = await _fetchrow("SELECT * FROM calls WHERE call_id=$1", data["call_id"])
+        final = await _fetchrow(
+            "SELECT * FROM final_call_billing_records WHERE call_id=$1",
+            data["call_id"],
+        )
+        if not call or not final:
+            raise RuntimeError(f"Final billing record is not available for {data['call_id']}")
+        usage = await _fetch("SELECT * FROM usage_records WHERE call_id=$1", data["call_id"])
+        billing = await _fetchrow("SELECT * FROM call_billing WHERE call_id=$1", data["call_id"])
+        duration_seconds = Decimal("0")
+        if billing and billing["call_duration_seconds"]:
+            duration_seconds = Decimal(str(billing["call_duration_seconds"]))
+        elif call["started_at"] and call["ended_at"]:
+            duration_seconds = Decimal(str((call["ended_at"] - call["started_at"]).total_seconds()))
+        platform_cost_cents = cents((duration_seconds / Decimal("60")) * Decimal("0.05"))
+        component_costs = _billing_component_costs(usage)
+        recomputed_total = (
+            platform_cost_cents
+            + component_costs["stt"]
+            + component_costs["llm"]
+            + component_costs["tts"]
+            + component_costs["telephony"]
+        )
+        previous_total = int(final["total_cost_cents"])
+        delta = recomputed_total - previous_total
+        source_event_id = data.get("source_event_id")
+        source_event_uuid = UUID(str(source_event_id)) if source_event_id else None
+        adjustment_id = uuid5(
+            NAMESPACE_URL,
+            f"voicemesh:billing-adjustment:{data['call_id']}:{source_event_id}",
+        )
+        await _execute(
+            """
+            INSERT INTO billing_adjustments (
+                adjustment_id, call_id, tenant_id, assistant_id,
+                previous_total_cost_cents, recomputed_total_cost_cents,
+                delta_cost_cents, reason, source_event_id, workflow_id, status
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'CREATED')
+            ON CONFLICT (call_id, source_event_id) DO NOTHING
+            """,
+            adjustment_id,
+            data["call_id"],
+            data.get("tenant_id", final["tenant_id"]),
+            data.get("assistant_id", final["assistant_id"]),
+            previous_total,
+            recomputed_total,
+            delta,
+            data.get("reason", "late_usage_after_finalization"),
+            source_event_uuid,
+            data.get("workflow_id"),
+        )
+        set_span_attributes(
+            span,
+            call_id=data["call_id"],
+            previous_total_cost_cents=previous_total,
+            recomputed_total_cost_cents=recomputed_total,
+            delta_cost_cents=delta,
+        )
+        return {
+            "adjustment_id": str(adjustment_id),
+            "call_id": data["call_id"],
+            "previous_total_cost_cents": previous_total,
+            "recomputed_total_cost_cents": recomputed_total,
+            "delta_cost_cents": delta,
         }
 
 
