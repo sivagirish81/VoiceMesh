@@ -321,29 +321,43 @@ async def persist_tool_state(data: dict[str, Any]) -> None:
 
 @activity.defn
 async def emit_tool_event(data: dict[str, Any]) -> None:
-    event_type = EventType(str(data["event_type"]))
-    event = PipelineEvent.create(
-        call_id=data["call_id"],
-        turn_id=data["turn_id"],
-        event_type=event_type,
-        stage="tool",
-        sequence_number=1,
-        idempotency_key=f"{data['tool_invocation_id']}:{event_type}:{data.get('state')}",
-        payload={
-            "event_version": 1,
-            "tenant_id": data.get("tenant_id", "local-demo-tenant"),
-            "assistant_id": data.get("assistant_id", "local-demo-assistant"),
-            "tool_invocation_id": data["tool_invocation_id"],
-            "workflow_id": data.get("workflow_id"),
-            "tool_name": data["tool_name"],
-            "state": data.get("state"),
-            "external_request_id": data.get("external_request_id"),
-            "message": data.get("message"),
-            "last_error": data.get("last_error"),
-        },
-        trace_id=data.get("trace_id"),
-    )
-    await _insert_outbox_event(event)
+    with tracer.start_as_current_span(
+        "temporal.activity.emit_tool_event",
+        context=context_from_payload(data),
+    ) as span:
+        event_type = EventType(str(data["event_type"]))
+        set_span_attributes(
+            span,
+            workflow_id=data.get("workflow_id"),
+            tenant_id=data.get("tenant_id"),
+            assistant_id=data.get("assistant_id"),
+            call_id=data["call_id"],
+            tool_invocation_id=data["tool_invocation_id"],
+            event_type=str(event_type),
+            status=data.get("state"),
+        )
+        event = PipelineEvent.create(
+            call_id=data["call_id"],
+            turn_id=data["turn_id"],
+            event_type=event_type,
+            stage="tool",
+            sequence_number=1,
+            idempotency_key=f"{data['tool_invocation_id']}:{event_type}:{data.get('state')}",
+            payload={
+                "event_version": 1,
+                "tenant_id": data.get("tenant_id", "local-demo-tenant"),
+                "assistant_id": data.get("assistant_id", "local-demo-assistant"),
+                "tool_invocation_id": data["tool_invocation_id"],
+                "workflow_id": data.get("workflow_id"),
+                "tool_name": data["tool_name"],
+                "state": data.get("state"),
+                "external_request_id": data.get("external_request_id"),
+                "message": data.get("message"),
+                "last_error": data.get("last_error"),
+            },
+            trace_id=data.get("trace_id"),
+        )
+        await _insert_outbox_event(event)
 
 
 async def _call_external_action(
@@ -465,29 +479,41 @@ async def get_external_action_status(data: dict[str, Any]) -> dict[str, Any]:
 
 @activity.defn
 async def load_billing_readiness(data: dict[str, Any]) -> dict[str, Any]:
-    rows = await _fetch(
-        """
-        SELECT usage_type FROM call_usage_events WHERE call_id=$1
-        UNION
-        SELECT CASE usage_type
-            WHEN 'audio_minute' THEN 'stt_audio_seconds'
-            WHEN 'input_token' THEN 'llm_input_tokens'
-            WHEN 'cached_input_token' THEN 'llm_input_tokens'
-            WHEN 'output_token' THEN 'llm_output_tokens'
-            WHEN 'output_audio_token' THEN 'tts_audio_seconds'
-            WHEN 'input_text_token' THEN 'tts_characters'
-            ELSE usage_type
-        END AS usage_type
-        FROM usage_records WHERE call_id=$1
-        """,
-        data["call_id"],
-    )
-    present = {str(row["usage_type"]) for row in rows}
-    required = set(data.get("required_usage_types", []))
-    return {
-        "present_usage_types": sorted(present),
-        "missing_usage_types": sorted(required - present),
-    }
+    with tracer.start_as_current_span(
+        "temporal.activity.load_billing_readiness",
+        context=context_from_payload(data),
+    ) as span:
+        rows = await _fetch(
+            """
+            SELECT usage_type FROM call_usage_events WHERE call_id=$1
+            UNION
+            SELECT CASE usage_type
+                WHEN 'audio_minute' THEN 'stt_audio_seconds'
+                WHEN 'input_token' THEN 'llm_input_tokens'
+                WHEN 'cached_input_token' THEN 'llm_input_tokens'
+                WHEN 'output_token' THEN 'llm_output_tokens'
+                WHEN 'output_audio_token' THEN 'tts_audio_seconds'
+                WHEN 'input_text_token' THEN 'tts_characters'
+                ELSE usage_type
+            END AS usage_type
+            FROM usage_records WHERE call_id=$1
+            """,
+            data["call_id"],
+        )
+        present = {str(row["usage_type"]) for row in rows}
+        required = set(data.get("required_usage_types", []))
+        missing = sorted(required - present)
+        set_span_attributes(
+            span,
+            call_id=data["call_id"],
+            billing_status="WAITING_FOR_USAGE" if missing else "READY",
+            present_usage_types=sorted(present),
+            missing_usage_types=missing,
+        )
+        return {
+            "present_usage_types": sorted(present),
+            "missing_usage_types": missing,
+        }
 
 
 @activity.defn
@@ -580,23 +606,34 @@ async def finalize_call_billing(data: dict[str, Any]) -> dict[str, Any]:
 
 @activity.defn
 async def emit_workflow_event(data: dict[str, Any]) -> None:
-    event = PipelineEvent.create(
-        call_id=data["call_id"],
-        turn_id="session",
-        event_type=EventType(str(data["event_type"])),
-        stage="temporal",
-        sequence_number=1,
-        idempotency_key=f"{data['call_id']}:{data['event_type']}:{data.get('workflow_id')}",
-        payload={
-            "event_version": 1,
-            "tenant_id": data.get("tenant_id", "local-demo-tenant"),
-            "assistant_id": data.get("assistant_id", "local-demo-assistant"),
-            "workflow_id": data.get("workflow_id"),
-            **dict(data.get("payload", {})),
-        },
-        trace_id=data.get("trace_id"),
-    )
-    await _insert_outbox_event(event)
+    with tracer.start_as_current_span(
+        "temporal.activity.emit_workflow_event",
+        context=context_from_payload(data),
+    ) as span:
+        event_type = EventType(str(data["event_type"]))
+        set_span_attributes(
+            span,
+            call_id=data["call_id"],
+            workflow_id=data.get("workflow_id"),
+            event_type=str(event_type),
+        )
+        event = PipelineEvent.create(
+            call_id=data["call_id"],
+            turn_id="session",
+            event_type=event_type,
+            stage="temporal",
+            sequence_number=1,
+            idempotency_key=f"{data['call_id']}:{data['event_type']}:{data.get('workflow_id')}",
+            payload={
+                "event_version": 1,
+                "tenant_id": data.get("tenant_id", "local-demo-tenant"),
+                "assistant_id": data.get("assistant_id", "local-demo-assistant"),
+                "workflow_id": data.get("workflow_id"),
+                **dict(data.get("payload", {})),
+            },
+            trace_id=data.get("trace_id"),
+        )
+        await _insert_outbox_event(event)
 
 
 @activity.defn

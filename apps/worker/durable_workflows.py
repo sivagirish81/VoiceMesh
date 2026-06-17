@@ -1,5 +1,5 @@
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -31,6 +31,14 @@ with workflow.unsafe.imports_passed_through():
     )
 
 
+def _validated_payload_with_trace(parsed: Any, original: dict[str, Any]) -> dict[str, Any]:
+    payload = cast(dict[str, Any], parsed.model_dump(mode="json"))
+    trace_payload = original.get("_trace")
+    if isinstance(trace_payload, dict):
+        payload["_trace"] = trace_payload
+    return payload
+
+
 @workflow.defn(name="DurableActionWorkflow")
 class DurableActionWorkflow:
     def __init__(self) -> None:
@@ -46,7 +54,7 @@ class DurableActionWorkflow:
     @workflow.run
     async def run(self, input_data: dict[str, Any]) -> dict[str, Any]:
         parsed = DurableActionInput.model_validate(input_data)
-        self.input_data = parsed.model_dump(mode="json")
+        self.input_data = _validated_payload_with_trace(parsed, input_data)
         await self._transition(DurableActionState.REQUESTED, "tool.action.requested")
         try:
             await self._transition(
@@ -219,7 +227,7 @@ class BillingFinalizationWorkflow:
     @workflow.run
     async def run(self, input_data: dict[str, Any]) -> dict[str, Any]:
         parsed = BillingFinalizationInput.model_validate(input_data)
-        self.input_data = parsed.model_dump(mode="json")
+        self.input_data = _validated_payload_with_trace(parsed, input_data)
         if input_data.get("call_ended"):
             self.call_ended = True
         try:
