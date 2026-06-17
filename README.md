@@ -181,6 +181,8 @@ make demo-tts-backpressure
 make demo-duplicate-events
 make demo-db-down
 make demo-kill-worker
+make demo-durable-action-cancel
+make demo-billing-late-tts
 ```
 
 ### TTS Backpressure
@@ -211,6 +213,20 @@ consumer after bounded DB retries, and projects the event after Postgres returns
 survives in Temporal server storage and pending work resumes. This demonstrates durable
 outer-loop recovery, not recovery of an active browser or provider media stream.
 
+### Durable Action Cancel Race
+
+`make demo-durable-action-cancel` starts a `DurableActionWorkflow` for a mock refund
+request. The mock create API intentionally sleeps; the script sends `CancelRequested`
+before the external `refund_request_id` exists. When create returns `rr_001`, the
+workflow immediately calls the cancel endpoint and persists `CANCELLED`.
+
+### Billing Waits For Late TTS Usage
+
+`make demo-billing-late-tts` publishes call/usage events through Kafka. The event worker
+writes usage to Postgres and signals `BillingFinalizationWorkflow` only after the write
+succeeds. The workflow waits while TTS usage is missing, then finalizes after the late
+TTS usage event arrives.
+
 ## Commands
 
 | Command | Purpose |
@@ -225,6 +241,8 @@ outer-loop recovery, not recovery of an active browser or provider media stream.
 | `make dashboard` | Run Next.js locally |
 | `make migrate` | Reapply the idempotent SQL migration |
 | `make create-topics` | Create required Kafka topics |
+| `make demo-durable-action-cancel` | Demonstrate cancel-before-external-ID durable tool action |
+| `make demo-billing-late-tts` | Demonstrate billing workflow waiting for late TTS usage |
 | `make smoke-live-pipeline` | Run a real OpenAI STT → LLM → TTS WebSocket smoke test |
 | `make test` | Run Python tests |
 | `make lint` | Run Ruff, mypy, and dashboard lint |
@@ -262,7 +280,7 @@ The production contract should add:
 VoiceMesh uses Pydantic validation today. A production deployment should add a schema
 registry and compatibility checks. Topics currently include `call-events`,
 `pipeline-events`, `provider-events`, `usage-events`, `billing-events`,
-`outbox-events`, and `dead-letter-events`.
+`tool-events`, `webhook-events`, `outbox-events`, and `dead-letter-events`.
 
 ## Observability
 
@@ -293,11 +311,16 @@ See [docs/otel_tracing.md](docs/otel_tracing.md).
 - [Runtime boundaries](docs/runtime_boundaries.md)
 - [Event contracts](docs/events.md)
 - [Kafka versus Temporal](docs/kafka_vs_temporal.md)
+- [Temporal workflows](docs/temporal-workflows.md)
+- [Durable action tools](docs/durable-action-tools.md)
 - [Provider adapters](docs/provider_abstractions.md)
 - [Postgres reliability](docs/postgres_reliability.md)
 - [Billing pipeline](docs/billing.md)
+- [Billing finalization](docs/billing-finalization.md)
+- [Webhook delivery](docs/webhook-delivery.md)
 - [OpenTelemetry](docs/otel_tracing.md)
 - [Multi-tenant scaling and webhooks](docs/scaling.md)
+- [Durable outer-loop demos](docs/demo.md)
 - [Failure modes](docs/failure_modes.md)
 - [Three-minute demo](docs/demo_script.md)
 
@@ -310,8 +333,9 @@ See [docs/otel_tracing.md](docs/otel_tracing.md).
 - Kafka publishing is awaited by the session worker; a production runtime should use a
   bounded asynchronous publication buffer or local durable handoff.
 - The POC event envelope lacks tenant, assistant, response, and schema-version fields.
-- Temporal still starts at call admission for the worker-recovery demo instead of only
-  being started by lifecycle events that require durable orchestration.
+- Temporal still has a legacy per-call lifecycle workflow for the worker-recovery demo;
+  the production-inspired path uses Temporal for durable actions, billing
+  finalization, webhook delivery, and call completion.
 - TTS token usage is estimated and should be replaced by provider-reported usage when
   available.
 - The local pricing catalog is manually versioned and is not synchronized from provider

@@ -10,6 +10,7 @@ from apps.api.events.kafka_producer import KafkaEventProducer
 from apps.api.events.schemas import EventType, PipelineEvent
 from apps.api.failure_injection.injector import FailureInjector
 from apps.api.telemetry.tracing import configure_tracing
+from apps.api.temporal_client import TemporalLifecycleClient
 
 logger = logging.getLogger(__name__)
 
@@ -26,18 +27,74 @@ async def run_worker() -> None:
         settings.database_command_timeout,
     )
     producer = KafkaEventProducer(settings.kafka_bootstrap_servers)
+    temporal = TemporalLifecycleClient(settings)
     await repository.connect()
     await producer.start()
+    await temporal.connect()
     projector = EventProjector(
         repository,
         platform_rate_per_minute_usd=settings.billing_platform_rate_per_minute_usd,
         billing_pricing_version=settings.billing_pricing_version,
     )
 
+    def required_usage_types() -> list[str]:
+        return [
+            item.strip()
+            for item in settings.billing_required_usage_types.split(",")
+            if item.strip()
+        ]
+
     async def handle(event: PipelineEvent) -> None:
         inserted = await projector.project(event)
         if inserted is None:
             raise RuntimeError(f"Postgres projection failed for event {event.event_id}")
+        if inserted is not False and event.event_type == EventType.CALL_ENDED:
+            await temporal.start_billing_finalization(
+                event.call_id,
+                {
+                    "tenant_id": event.payload.get("tenant_id", "local-demo-tenant"),
+                    "assistant_id": event.payload.get("assistant_id", "local-demo-assistant"),
+                    "call_id": event.call_id,
+                    "required_usage_types": required_usage_types(),
+                    "wait_timeout_seconds": settings.billing_usage_wait_seconds,
+                    "missing_usage_policy": settings.billing_missing_usage_policy,
+                    "pricing_version": settings.billing_pricing_version,
+                    "call_ended": True,
+                    "trace_id": event.trace_id,
+                },
+            )
+            await temporal.signal_billing(
+                event.call_id,
+                "CallEnded",
+                {"call_id": event.call_id, "trace_id": event.trace_id},
+            )
+        if inserted is not False and str(event.event_type).startswith("usage."):
+            await temporal.start_billing_finalization(
+                event.call_id,
+                {
+                    "tenant_id": event.payload.get("tenant_id", "local-demo-tenant"),
+                    "assistant_id": event.payload.get("assistant_id", "local-demo-assistant"),
+                    "call_id": event.call_id,
+                    "required_usage_types": required_usage_types(),
+                    "wait_timeout_seconds": settings.billing_usage_wait_seconds,
+                    "missing_usage_policy": settings.billing_missing_usage_policy,
+                    "pricing_version": settings.billing_pricing_version,
+                    "trace_id": event.trace_id,
+                },
+            )
+            measurements = event.payload.get("measurements", [])
+            for measurement in measurements:
+                usage_type = str(measurement.get("usage_type", ""))
+                normalized = projector._normalized_usage_type(usage_type, event.stage)
+                await temporal.signal_billing(
+                    event.call_id,
+                    "UsageRecorded",
+                    {
+                        "call_id": event.call_id,
+                        "usage_type": normalized,
+                        "trace_id": event.trace_id,
+                    },
+                )
         if inserted is not False or event.event_type == EventType.DUPLICATE_EVENT_IGNORED:
             return
         duplicate = PipelineEvent.create(

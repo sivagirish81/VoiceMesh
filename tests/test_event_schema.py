@@ -45,3 +45,6 @@ def test_usage_and_billing_events_have_dedicated_topics() -> None:
     assert topic_for_event(EventType.USAGE_LLM_RECORDED) == "usage-events"
     assert topic_for_event(EventType.USAGE_TTS_RECORDED) == "usage-events"
     assert topic_for_event(EventType.BILLING_USAGE_RECORDED) == "billing-events"
+    assert topic_for_event(EventType.BILLING_FINALIZED) == "billing-events"
+    assert topic_for_event(EventType.TOOL_ACTION_REQUESTED) == "tool-events"
+    assert topic_for_event(EventType.WEBHOOK_DELIVERED) == "webhook-events"

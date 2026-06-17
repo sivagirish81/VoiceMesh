@@ -221,6 +221,26 @@ strict deadlines and cancellation. State-changing, long-running, or retry-heavy 
 should leave the hot path and use a durable workflow or idempotent worker. End-of-call
 reports should always be asynchronous and retryable, with delivery state in Postgres.
 
+The implementation now has three explicit tool execution modes:
+
+- `SYNC_DIRECT`: direct, short-lived API calls from the session worker/tool executor.
+- `ASYNC_JOB`: accepted/pending work represented by Kafka events.
+- `DURABLE_ACTION`: `DurableActionWorkflow` for long-running, cancelable, state-changing
+  tools.
+
+Temporal also owns the durable billing and delivery outer loop:
+
+```mermaid
+flowchart LR
+    Ended["call.ended"] --> Kafka["Kafka"]
+    Kafka --> UsageWriter["UsageWriter / Event Worker"]
+    UsageWriter --> PG["Postgres usage rows"]
+    UsageWriter -->|"UsageRecorded signal"| Billing["BillingFinalizationWorkflow"]
+    Billing --> Final["final_call_billing_records"]
+    Billing --> Event["billing.finalized"]
+    Completion["CallCompletionWorkflow"] --> Webhook["WebhookDeliveryWorkflow"]
+```
+
 ## Current Implementation Versus Production Direction
 
 | Area | Current POC | Production direction |
@@ -234,7 +254,7 @@ reports should always be asynchronous and retryable, with delivery state in Post
 | Kafka | Publishes coarse lifecycle, stage, provider, usage, and backpressure events; no raw frames, LLM tokens, or TTS chunks | Add schema registry, W3C headers, lag SLOs, and bounded asynchronous publication |
 | Postgres | Dedicated Kafka event worker projects calls, events, metrics, usage, billing, and idempotency outside the provider chain | Separate ingestion/query pools, reconciliation tooling, and tenant-aware retention |
 | Outbox | Billing events created from a DB usage projection are written atomically to the outbox and published once by the worker | Scale publishers with leases, stronger delivery metrics, and explicit event ownership |
-| Temporal | Workflow starts per call for the lifecycle recovery lab; routine cork/uncork stays in memory | Start or signal workflows only for post-call, webhook, tool, and retry-heavy lifecycle work |
+| Temporal | Legacy call lifecycle workflow plus durable action, billing finalization, webhook delivery, and call completion workflows; routine cork/uncork stays in memory | Keep Temporal on durable outer-loop work only and move hot-path provider/tool decisions into session workers |
 | Billing | Versioned price catalog, immutable usage records, per-call rollup, and dashboard; TTS token units are estimated | Provider invoice reconciliation, contract rates, taxes/credits, and tenant wallets |
 | Identity | `call_id`, `turn_id`, sequence, event ID, trace ID | Add tenant, assistant, response, schema version, and propagated trace context |
 | Deployment | Single-host Docker Compose | Replicated services, call-aware routing, autoscaling, quotas, and failure-domain isolation |

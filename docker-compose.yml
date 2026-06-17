@@ -62,7 +62,7 @@ services:
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
-        for topic in call-events pipeline-events provider-events outbox-events usage-events billing-events dead-letter-events; do
+        for topic in call-events pipeline-events provider-events outbox-events usage-events billing-events tool-events webhook-events dead-letter-events; do
           /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic "$$topic" --partitions 3 --replication-factor 1
         done
 

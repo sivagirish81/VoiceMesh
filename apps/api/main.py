@@ -14,7 +14,7 @@ from apps.api.events.kafka_producer import KafkaEventProducer
 from apps.api.failure_injection.injector import FailureInjector
 from apps.api.pipeline.stream_module import StreamModule
 from apps.api.providers.provider_registry import ProviderRegistry
-from apps.api.routes import billing, calls, demo, health, metrics
+from apps.api.routes import billing, calls, demo, health, metrics, mock_customer, tools
 from apps.api.telemetry.tracing import configure_tracing
 from apps.api.temporal_client import TemporalLifecycleClient
 from apps.api.websocket_transport import BrowserWebSocketTransport
@@ -78,6 +78,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(demo.router)
     application.include_router(metrics.router)
     application.include_router(billing.router)
+    application.include_router(mock_customer.router)
+    application.include_router(tools.router)
 
     @application.get("/")
     async def root() -> dict[str, str]:

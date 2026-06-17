@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     otel_exporter_otlp_endpoint: str = "http://localhost:4317"
     billing_platform_rate_per_minute_usd: float = Field(default=0.05, ge=0)
     billing_pricing_version: str = "openai-2026-06-15+voicemesh-lab-v1"
+    billing_required_usage_types: str = (
+        "stt_audio_seconds,llm_input_tokens,llm_output_tokens,tts_characters"
+    )
+    billing_usage_wait_seconds: int = Field(default=20, ge=1)
+    billing_missing_usage_policy: str = "FINALIZED_WITH_WARNINGS"
+    durable_action_default_timeout_seconds: int = Field(default=3600, ge=1)
+    webhook_max_attempts: int = Field(default=5, ge=1)
+    webhook_backoff_seconds: int = Field(default=2, ge=0)
 
     backpressure_high_watermark: int = Field(default=10, ge=2)
     backpressure_low_watermark: int = Field(default=3, ge=0)

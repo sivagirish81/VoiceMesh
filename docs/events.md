@@ -43,9 +43,14 @@ Recommended production events include:
 - `tts.first_audio_byte`, `tts.completed`, `tts.cancelled`
 - `user.barged_in`
 - `provider.error`, `provider.timeout`
-- `tool.call_requested`, `tool.call_completed`
-- `webhook.delivery_requested`, `webhook.delivered`
-- `billing.usage_recorded`
+- `tool.action.requested`, `tool.action.accepted`, `tool.action.cancel_requested`,
+  `tool.action.cancelled`, `tool.action.completed`, `tool.action.failed`
+- `webhook.delivery_requested`, `webhook.delivered`, `webhook.failed`
+- `billing.usage_recorded`, `billing.finalized`
+
+VoiceMesh currently routes tool events to `tool-events`, webhook events to
+`webhook-events`, usage events to `usage-events`, and final billing events to
+`billing-events`.
 
 Pipeline pressure events can be emitted when they are operationally meaningful, such as
 a prolonged cork, a threshold breach, or a turn failure. Routine queue oscillation is
