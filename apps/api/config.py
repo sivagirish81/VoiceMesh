@@ -47,6 +47,16 @@ class Settings(BaseSettings):
 
     backpressure_high_watermark: int = Field(default=10, ge=2)
     backpressure_low_watermark: int = Field(default=3, ge=0)
+    flow_queue_max_items: int = Field(default=128, ge=4)
+    speech_chars_per_second: float = Field(default=14.0, gt=0)
+    llm_to_tts_low_watermark_speak_ahead_ms: float = Field(default=300, ge=0)
+    llm_to_tts_high_watermark_speak_ahead_ms: float = Field(default=1200, gt=0)
+    llm_to_tts_hard_limit_speak_ahead_ms: float = Field(default=2500, gt=0)
+    tts_to_transport_low_watermark_audio_ms: float = Field(default=300, ge=0)
+    tts_to_transport_high_watermark_audio_ms: float = Field(default=1200, gt=0)
+    tts_to_transport_hard_limit_audio_ms: float = Field(default=2500, gt=0)
+    backpressure_hard_limit_policy: str = "cancel_response"
+    tts_output_sample_rate: int = Field(default=24000, ge=8000)
     turn_timeout_seconds: float = Field(default=30, gt=0)
     vad_energy_threshold: float = Field(default=0.018, gt=0)
     vad_silence_ms: int = Field(default=700, ge=100)
@@ -64,6 +74,32 @@ class Settings(BaseSettings):
     def validate_watermarks(self) -> "Settings":
         if self.backpressure_low_watermark >= self.backpressure_high_watermark:
             raise ValueError("BACKPRESSURE_LOW_WATERMARK must be below the high watermark")
+        if (
+            self.llm_to_tts_low_watermark_speak_ahead_ms
+            >= self.llm_to_tts_high_watermark_speak_ahead_ms
+        ):
+            raise ValueError("LLM_TO_TTS low watermark must be below high watermark")
+        if (
+            self.llm_to_tts_high_watermark_speak_ahead_ms
+            > self.llm_to_tts_hard_limit_speak_ahead_ms
+        ):
+            raise ValueError("LLM_TO_TTS high watermark must be below hard limit")
+        if (
+            self.tts_to_transport_low_watermark_audio_ms
+            >= self.tts_to_transport_high_watermark_audio_ms
+        ):
+            raise ValueError("TTS_TO_TRANSPORT low watermark must be below high watermark")
+        if (
+            self.tts_to_transport_high_watermark_audio_ms
+            > self.tts_to_transport_hard_limit_audio_ms
+        ):
+            raise ValueError("TTS_TO_TRANSPORT high watermark must be below hard limit")
+        if self.backpressure_hard_limit_policy not in {
+            "cancel_response",
+            "drop_oldest",
+            "fail_turn",
+        }:
+            raise ValueError("BACKPRESSURE_HARD_LIMIT_POLICY is not supported")
         return self
 
     def validate_provider_credentials(self) -> None:

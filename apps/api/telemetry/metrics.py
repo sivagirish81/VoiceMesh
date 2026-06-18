@@ -16,11 +16,20 @@ STAGE_LATENCY = Histogram(
     ["stage", "provider"],
     buckets=(10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000),
 )
-QUEUE_DEPTH = Gauge("voicemesh_queue_depth", "Current pipeline queue depth", ["stage"])
+QUEUE_DEPTH = Gauge(
+    "voicemesh_queue_depth",
+    "Current weighted pipeline queue depth",
+    ["stage", "depth_unit"],
+)
+QUEUE_ITEMS = Gauge(
+    "voicemesh_queue_items",
+    "Current pipeline queue item count for debug visibility",
+    ["stage"],
+)
 BACKPRESSURE_TOTAL = Counter(
     "voicemesh_backpressure_total",
     "Pipeline cork/uncork transitions",
-    ["stage", "transition", "reason_code"],
+    ["stage", "transition", "reason_code", "depth_unit"],
 )
 BACKPRESSURE_SECONDS = Histogram(
     "voicemesh_backpressure_duration_seconds",
@@ -39,6 +48,21 @@ PROVIDER_FALLBACKS = Counter(
 )
 DB_WRITE_FAILURES = Counter("voicemesh_db_write_failures_total", "Postgres write failures")
 ACTIVE_CALLS = Gauge("voicemesh_active_calls", "Active WebSocket calls")
+HARD_LIMIT_TOTAL = Counter(
+    "voicemesh_backpressure_hard_limit_total",
+    "Hard-limit flow-control actions",
+    ["stage", "depth_unit", "policy"],
+)
+STALE_CHUNKS_DROPPED_TOTAL = Counter(
+    "voicemesh_stale_chunks_dropped_total",
+    "Stale chunks dropped before provider or transport use",
+    ["stage", "chunk_type", "reason_code"],
+)
+STALE_AUDIO_DROPPED_MS_TOTAL = Counter(
+    "voicemesh_stale_audio_dropped_ms_total",
+    "Playable stale audio duration dropped before transport",
+    ["stage", "reason_code"],
+)
 
 CALL_EVENTS_TOTAL = Counter(
     "voicemesh_call_events_total",

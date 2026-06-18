@@ -59,7 +59,7 @@ async def main() -> None:
                 depth = message["state"].get("queue_depths", {}).get("llm_to_tts")
                 if isinstance(depth, int) and depth != last_depth:
                     last_depth = depth
-                    print(f"QUEUE: llm_to_tts depth={depth}")
+                    print(f"QUEUE: llm_to_tts queued_speak_ahead_ms={depth:.0f}")
                 return
             if message.get("type") != "pipeline.event":
                 return

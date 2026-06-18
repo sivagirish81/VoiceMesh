@@ -7,7 +7,7 @@ path:
 Transport -> Session Worker -> VAD -> STT -> LLM -> TTS -> Transport
 ```
 
-The session worker still owns active provider streams, token/audio queues,
+The session worker still owns active provider streams, text/audio queues,
 backpressure, cancellation, and eventual barge-in behavior. Temporal owns durable work
 that can outlive the call or needs retry/audit semantics:
 

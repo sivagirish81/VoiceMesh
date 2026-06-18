@@ -12,7 +12,7 @@ Postgres, OpenTelemetry, Jaeger, Prometheus, and Grafana.
 ## What It Demonstrates
 
 - Real `VAD → STT → LLM → TTS → Transport` execution
-- In-memory bounded queues with cork/uncork backpressure
+- In-memory weighted queues with cork/uncork backpressure
 - Provider adapters that isolate the session runtime from concrete APIs
 - Kafka event streaming, replay, and duplicate-delivery experiments
 - Temporal worker recovery for durable outer-loop work
@@ -56,14 +56,15 @@ flowchart LR
 ```
 
 The session worker owns the transport connection, active provider streams, call and
-turn IDs, bounded token/audio queues, phrase buffering, cancellation, and barge-in
-state. Kafka provides coarse durable events and fanout. Postgres is the system of
+turn IDs, response-fenced text/audio queues, phrase buffering, cancellation, and
+barge-in state. Kafka provides coarse durable events and fanout. Postgres is the system of
 record. Temporal is optional for post-call and retry-heavy workflows; it is not part of
 normal streaming or cork/uncork.
 
 Read [docs/architecture.md](docs/architecture.md) for the full model and
 [docs/runtime_boundaries.md](docs/runtime_boundaries.md) for turn fencing, cancellation,
-and barge-in.
+and barge-in. See [docs/backpressure.md](docs/backpressure.md) for the hot-path
+flow-control model.
 
 ## Current POC
 
@@ -73,7 +74,9 @@ The working implementation intentionally has several simpler boundaries:
 - VAD is RMS energy over real microphone PCM.
 - A long-lived OpenAI Realtime transcription session receives 24 kHz PCM continuously,
   emits partial deltas, and is committed at the detected turn boundary.
-- LLM and TTS stream through real bounded in-memory queues.
+- LLM and TTS stream through real bounded in-memory queues. `llm_to_tts` corks on
+  queued speak-ahead milliseconds, and `tts_to_transport` corks on queued playable
+  audio milliseconds.
 - Kafka receives coarse stage, lifecycle, provider, and usage events; raw audio, LLM
   tokens, and TTS chunks remain in memory/WebSocket only.
 - A Kafka consumer projects calls, events, metrics, idempotency keys, usage, and billing
@@ -82,11 +85,13 @@ The working implementation intentionally has several simpler boundaries:
   tokens, and a configurable per-minute platform fee.
 - A Temporal workflow still starts per call for the recovery lab, but routine
   cork/uncork is no longer signaled to it.
-- Full-duplex barge-in, response fencing, and provider cancellation are not implemented.
+- Response-fenced text/audio queues and cancellation primitives are implemented.
+  Full-duplex browser playback interruption and provider-native cancellation remain
+  production hardening work.
 
 These are documented current behaviors, not the recommended production architecture.
-The next production-oriented step is turn fencing, cancellation, and moving Temporal
-entirely to lifecycle work that genuinely requires durable workflow semantics.
+The next production-oriented step is tighter browser/provider cancellation and moving
+Temporal entirely to lifecycle work that genuinely requires durable workflow semantics.
 
 ## Kafka, Postgres, And Temporal
 
@@ -191,8 +196,13 @@ make demo-billing-late-tts
 
 `make demo-tts-backpressure` requires no microphone. It creates spoken test input with
 OpenAI, sends it through the normal WebSocket path, and injects 400 ms delay per TTS
-output chunk. The bounded token queue reaches its high watermark and corks. After the
-delay is removed, the queue drains to its low watermark and uncorks.
+output chunk. The `llm_to_tts` queue accumulates estimated future speech duration
+(`queued_speak_ahead_ms`). At the high watermark the session worker corks upstream LLM
+phrase production. After the delay is removed, TTS catches up, the speak-ahead budget
+drains to the low watermark, and the session worker uncorks.
+
+The transport side uses the same pattern with playable audio duration:
+`tts_to_transport` tracks `queued_audio_ms` instead of raw chunk count.
 
 This proves in-memory backpressure. Kafka records the transitions for demo visibility;
 Temporal is not architecturally required for them.
@@ -303,8 +313,8 @@ OpenAI provider spans such as `provider.openai.llm.responses_stream` and
 
 The primary latency SLI is end-of-speech to first audible agent audio. Component metrics
 should include STT final latency, LLM time to first token, TTS time to first audio byte,
-transport lag, queue depth, cork duration, barge-in cancellation latency, stale chunks,
-provider errors, Kafka lag, Postgres pool wait, and webhook retries.
+transport lag, weighted queue depth, cork duration, barge-in cancellation latency,
+stale chunks, provider errors, Kafka lag, Postgres pool wait, and webhook retries.
 
 Prometheus and Grafana are intentionally scoped to **live operational observability** in
 this pass. Grafana provisions Prometheus-only dashboards from
@@ -333,6 +343,7 @@ See [docs/otel_tracing.md](docs/otel_tracing.md).
 
 - [Architecture](docs/architecture.md)
 - [Runtime boundaries](docs/runtime_boundaries.md)
+- [Backpressure and corking](docs/backpressure.md)
 - [Event contracts](docs/events.md)
 - [Kafka versus Temporal](docs/kafka_vs_temporal.md)
 - [Temporal workflows](docs/temporal-workflows.md)
@@ -352,7 +363,8 @@ See [docs/otel_tracing.md](docs/otel_tracing.md).
 
 - RMS VAD is environment-sensitive and lacks production endpointing calibration.
 - Browser capture uses `ScriptProcessorNode`; an AudioWorklet is the migration path.
-- Barge-in, response fencing, playback cancellation, and stale-chunk drops are absent.
+- Browser-level stop-playback on barge-in is still limited; server-side response
+  fencing, stale-chunk drops, and queue flushing are implemented.
 - Only OpenAI provider adapters are implemented.
 - Kafka publishing is awaited by the session worker; a production runtime should use a
   bounded asynchronous publication buffer or local durable handoff.
@@ -369,7 +381,7 @@ See [docs/otel_tracing.md](docs/otel_tracing.md).
 
 ## Future Work
 
-- Turn/response fencing, barge-in, and cooperative provider cancellation
+- Full-duplex browser barge-in and cooperative provider cancellation
 - Media gateway plus WebRTC/SIP/telephony transport adapters
 - Bounded asynchronous Kafka publication from the session runtime
 - Versioned tenant-aware event envelopes and schema registry compatibility checks

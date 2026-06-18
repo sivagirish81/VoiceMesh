@@ -37,7 +37,7 @@ coordination, or recovery after worker loss:
 - long-running customer actions.
 
 Temporal is not necessary for the active voice loop. Normal VAD, STT, LLM, TTS,
-transport, token buffering, audio buffering, and cork/uncork decisions remain inside
+transport, text buffering, audio buffering, and cork/uncork decisions remain inside
 the session worker.
 
 ## Decision Rule

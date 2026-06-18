@@ -24,19 +24,21 @@ recovery utterance according to policy.
 
 ## TTS Slow
 
-When LLM output outpaces phrase synthesis, the token/phrase queue grows. At the high
-watermark the session runtime corks upstream production; at capacity, bounded `put`
-operations pause. Low-watermark drainage uncorks the stream.
+When LLM output outpaces phrase synthesis, `llm_to_tts` queued speak-ahead milliseconds
+grow. At the high watermark the session runtime corks upstream production before the
+queue is full; at capacity, bounded `put` operations remain a safety net. Low-watermark
+drainage uncorks the stream.
 
 This state is in memory. A prolonged incident may emit a Kafka event, but routine
 cork/uncork transitions do not require Temporal.
 
 ## Transport Overloaded
 
-Slow network or client playback grows the audio queue. TTS production pauses at queue
-capacity. If send lag exceeds the conversational budget, the worker should cancel the
-response, discard stale audio, or end the call rather than accumulating unbounded
-latency.
+Slow network or client playback grows `tts_to_transport` queued audio milliseconds. TTS
+production pauses when the queue corks, and capacity remains a safety net. If playable
+audio exceeds the hard limit or send lag exceeds the conversational budget, the worker
+should cancel the response, discard stale audio, or end the call rather than
+accumulating unbounded latency.
 
 ## Barge-In And Late Provider Output
 
@@ -44,7 +46,9 @@ User speech during agent playback cancels the active response. The worker stops
 playback, cancels or ignores LLM/TTS, drains old queues, and advances `turn_id` and
 `response_id`. Late chunks are rejected by the response fence and counted.
 
-The POC does not yet implement full-duplex barge-in or stale-response fencing.
+The POC implements server-side response fencing, queue flushing, and stale-chunk drops.
+Full browser stop-playback semantics and provider-native cancellation remain future
+production hardening.
 
 ## Duplicate Events
 

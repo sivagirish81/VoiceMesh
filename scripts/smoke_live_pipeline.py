@@ -44,7 +44,7 @@ async def run_smoke(
     response_parts: list[str] = []
     output_audio_bytes = 0
     observed_events: set[str] = set()
-    max_queue_depths: dict[str, int] = {}
+    max_queue_depths: dict[str, float] = {}
     cork_count = 0
     uncork_count = 0
     trace_id: str | None = None
@@ -80,7 +80,7 @@ async def run_smoke(
                     trace_id = trace_id or event.get("trace_id")
                     payload = event.get("payload", {})
                     queue_depth = payload.get("queue_depth")
-                    if isinstance(queue_depth, int):
+                    if isinstance(queue_depth, int | float):
                         max_queue_depths[event["stage"]] = max(
                             queue_depth, max_queue_depths.get(event["stage"], 0)
                         )

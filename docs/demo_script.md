@@ -14,7 +14,7 @@ turn, streaming OpenAI LLM output, phrase-level OpenAI TTS, and browser playback
 
 ## 0:35-1:00 - Runtime And Observability
 
-Show queue depths and the event feed. Open Jaeger and select `voicemesh-api`.
+Show weighted queue depths and the event feed. Open Jaeger and select `voicemesh-api`.
 
 Explain:
 
@@ -33,9 +33,9 @@ make demo-tts-backpressure
 ```
 
 No microphone is required. The command creates real spoken input through OpenAI,
-injects 400 ms TTS chunk delay, and shows the bounded `llm_to_tts` queue grow. At the
-high watermark, the session runtime corks upstream production. After delay removal, the
-queue drains to the low watermark and uncorks.
+injects 400 ms TTS chunk delay, and shows `llm_to_tts` queued speak-ahead milliseconds
+grow. At the high watermark, the session runtime corks upstream production. After delay
+removal, the speak-ahead budget drains to the low watermark and uncorks.
 
 Emphasize that cork/uncork is an in-memory scheduling decision. Kafka records it for
 this reliability demo; Temporal is not required for normal backpressure.

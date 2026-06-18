@@ -12,8 +12,20 @@ from opentelemetry import trace
 from apps.api.config import Settings
 from apps.api.events.kafka_producer import KafkaEventProducer
 from apps.api.events.schemas import EventType, PipelineEvent
-from apps.api.pipeline.backpressure import BackpressureController
-from apps.api.pipeline.events import AudioFrame, PipelineState
+from apps.api.pipeline.backpressure import (
+    BackpressureTransition,
+    DepthUnit,
+    FlowControlledQueue,
+    QueueClosed,
+)
+from apps.api.pipeline.events import (
+    AudioChunk,
+    AudioFrame,
+    BackpressureStageState,
+    EndOfStream,
+    PipelineState,
+    TextChunk,
+)
 from apps.api.pipeline.stages.llm import generate_tokens
 from apps.api.pipeline.stages.tts import synthesize_audio
 from apps.api.pipeline.stages.vad import EnergyVADProvider, TurnDetector
@@ -28,6 +40,8 @@ from apps.api.telemetry.metrics import (
     LLM_FIRST_TOKEN_LATENCY,
     PROVIDER_FAILURES,
     STAGE_LATENCY,
+    STALE_AUDIO_DROPPED_MS_TOTAL,
+    STALE_CHUNKS_DROPPED_TOTAL,
     TTS_FIRST_AUDIO_LATENCY,
 )
 from apps.api.telemetry.tracing import current_trace_id, set_span_attributes
@@ -37,6 +51,39 @@ from apps.api.websocket_transport import BrowserWebSocketTransport
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
 QueueCallback = Callable[[PipelineState], Awaitable[None]]
+TextQueueItem = TextChunk | EndOfStream
+AudioQueueItem = AudioChunk | EndOfStream
+
+
+class ResponseController:
+    def __init__(self) -> None:
+        self.active_response_id: str | None = None
+        self.response_turns: dict[str, str] = {}
+        self.cancelled: dict[str, str] = {}
+
+    def start_response(self, turn_id: str) -> str:
+        response_id = str(uuid4())
+        self.active_response_id = response_id
+        self.response_turns[response_id] = turn_id
+        return response_id
+
+    def cancel_response(self, response_id: str, reason: str) -> bool:
+        if response_id in self.cancelled:
+            return False
+        self.cancelled[response_id] = reason
+        if self.active_response_id == response_id:
+            self.active_response_id = None
+        return True
+
+    def is_response_cancelled(self, response_id: str) -> bool:
+        return response_id in self.cancelled
+
+    def is_response_active(self, response_id: str, turn_id: str) -> bool:
+        return (
+            self.active_response_id == response_id
+            and self.response_turns.get(response_id) == turn_id
+            and response_id not in self.cancelled
+        )
 
 
 class StreamModule:
@@ -71,6 +118,8 @@ class StreamModule:
         self._failed = False
         self._call_started_at = time.monotonic()
         self._usage_expectations: dict[str, set[str]] = {}
+        self._responses = ResponseController()
+        self._live_queues: dict[str, FlowControlledQueue[Any]] = {}
 
     async def run(self) -> None:
         ACTIVE_CALLS.inc()
@@ -155,6 +204,8 @@ class StreamModule:
             )
         started, ended = self.turn_detector.update(speech, chunk_duration_ms)
         if started:
+            if self.state.active_response_id:
+                await self._cancel_response(self.state.active_response_id, "barge_in")
             self.state.turn_id = str(uuid4())
             self._turn_has_audio = False
             self._turn_audio_bytes = 0
@@ -264,23 +315,41 @@ class StreamModule:
         )
 
     async def _run_llm_tts_transport(self, transcript: str) -> None:
-        token_queue: BackpressureController[str | None] = BackpressureController(
+        response_id = self._responses.start_response(self.state.turn_id)
+        self.state.active_response_id = response_id
+        token_queue: FlowControlledQueue[TextQueueItem] = FlowControlledQueue(
             call_id=self.call_id,
             stage="llm_to_tts",
-            high_watermark=self.settings.backpressure_high_watermark,
-            low_watermark=self.settings.backpressure_low_watermark,
+            depth_unit=DepthUnit.SPEAK_AHEAD_MS,
+            high_watermark=self.settings.llm_to_tts_high_watermark_speak_ahead_ms,
+            low_watermark=self.settings.llm_to_tts_low_watermark_speak_ahead_ms,
+            hard_limit=self.settings.llm_to_tts_hard_limit_speak_ahead_ms,
             on_state_change=self._on_backpressure,
+            weight_fn=lambda item: item.estimated_speech_ms
+            if isinstance(item, TextChunk)
+            else 0.0,
+            max_items=self.settings.flow_queue_max_items,
+            hard_limit_policy=self.settings.backpressure_hard_limit_policy,
         )
-        audio_queue: BackpressureController[bytes | None] = BackpressureController(
+        audio_queue: FlowControlledQueue[AudioQueueItem] = FlowControlledQueue(
             call_id=self.call_id,
             stage="tts_to_transport",
-            high_watermark=self.settings.backpressure_high_watermark,
-            low_watermark=self.settings.backpressure_low_watermark,
+            depth_unit=DepthUnit.AUDIO_MS,
+            high_watermark=self.settings.tts_to_transport_high_watermark_audio_ms,
+            low_watermark=self.settings.tts_to_transport_low_watermark_audio_ms,
+            hard_limit=self.settings.tts_to_transport_hard_limit_audio_ms,
             on_state_change=self._on_backpressure,
+            weight_fn=lambda item: item.duration_ms if isinstance(item, AudioChunk) else 0.0,
+            max_items=self.settings.flow_queue_max_items,
+            hard_limit_policy=self.settings.backpressure_hard_limit_policy,
         )
-        llm_task = asyncio.create_task(self._produce_llm(transcript, token_queue))
-        tts_task = asyncio.create_task(self._consume_tts(token_queue, audio_queue))
-        transport_task = asyncio.create_task(self._consume_transport(audio_queue))
+        self._live_queues = {
+            "llm_to_tts": token_queue,
+            "tts_to_transport": audio_queue,
+        }
+        llm_task = asyncio.create_task(self._produce_llm(transcript, token_queue, response_id))
+        tts_task = asyncio.create_task(self._consume_tts(token_queue, audio_queue, response_id))
+        transport_task = asyncio.create_task(self._consume_transport(audio_queue, response_id))
         try:
             await asyncio.wait_for(
                 asyncio.gather(llm_task, tts_task, transport_task),
@@ -291,15 +360,23 @@ class StreamModule:
                 task.cancel()
             await self.emit(EventType.PIPELINE_STAGE_TIMEOUT, self.state.current_stage)
             raise
+        finally:
+            await token_queue.close()
+            await audio_queue.close()
+            self._live_queues.clear()
 
     async def _produce_llm(
-        self, transcript: str, queue: BackpressureController[str | None]
+        self,
+        transcript: str,
+        queue: FlowControlledQueue[TextQueueItem],
+        response_id: str,
     ) -> None:
         self.state.current_stage = "llm"
         await self.emit(EventType.LLM_STARTED, "llm")
         started = time.perf_counter()
         first = True
         response_parts: list[str] = []
+        sequence = 0
         try:
             with tracer.start_as_current_span("pipeline.llm") as span:
                 set_span_attributes(
@@ -320,8 +397,27 @@ class StreamModule:
                         ).observe(first_token_latency)
                         await self.emit(EventType.LLM_FIRST_TOKEN, "llm")
                     response_parts.append(token)
-                    await queue.put(token)
-                    self._set_queue_depth("llm_to_tts", queue.depth)
+                    if self._is_stale_response(self.state.turn_id, response_id):
+                        await self._drop_stale_chunk(
+                            "llm_to_tts",
+                            "text",
+                            self._stale_reason(self.state.turn_id, response_id),
+                            response_id=response_id,
+                        )
+                        break
+                    sequence += 1
+                    await queue.wait_if_corked()
+                    await queue.put(
+                        TextChunk(
+                            call_id=self.call_id,
+                            turn_id=self.state.turn_id,
+                            response_id=response_id,
+                            sequence=sequence,
+                            text=token,
+                            estimated_speech_ms=self._estimate_speech_ms(token),
+                        )
+                    )
+                    self._set_queue_depth("llm_to_tts", queue.depth_weight)
                     await self._send_pipeline_state()
                     await self.transport.send_json("llm.token", text=token)
                 set_span_attributes(
@@ -333,7 +429,14 @@ class StreamModule:
             await self._provider_failed("llm", self.llm.name, exc)
             raise
         finally:
-            await queue.put(None)
+            await queue.put(
+                EndOfStream(
+                    call_id=self.call_id,
+                    turn_id=self.state.turn_id,
+                    response_id=response_id,
+                ),
+                bypass_cork=True,
+            )
         response = "".join(response_parts)
         self.state.response = response
         latency = (time.perf_counter() - started) * 1000
@@ -377,8 +480,9 @@ class StreamModule:
 
     async def _consume_tts(
         self,
-        token_queue: BackpressureController[str | None],
-        audio_queue: BackpressureController[bytes | None],
+        token_queue: FlowControlledQueue[TextQueueItem],
+        audio_queue: FlowControlledQueue[AudioQueueItem],
+        response_id: str,
     ) -> None:
         self.state.current_stage = "tts"
         buffer = ""
@@ -387,45 +491,80 @@ class StreamModule:
         await self.emit(EventType.TTS_STARTED, "tts")
         try:
             while True:
-                token = await token_queue.get()
+                item = await token_queue.get()
                 token_queue.task_done()
-                self._set_queue_depth("llm_to_tts", token_queue.depth)
+                self._set_queue_depth("llm_to_tts", token_queue.depth_weight)
                 await self._send_pipeline_state()
-                if token is None:
+                if isinstance(item, EndOfStream):
                     if buffer.strip():
                         first_audio = await self._synthesize_phrase(
-                            buffer, audio_queue, first_audio
+                            buffer, audio_queue, first_audio, item.turn_id, response_id
                         )
                     break
-                buffer += token
+                if self._is_stale_chunk(item):
+                    await self._drop_stale_chunk(
+                        "tts",
+                        "text",
+                        self._stale_reason(item.turn_id, item.response_id),
+                        response_id=item.response_id,
+                    )
+                    continue
+                buffer += item.text
                 if len(buffer) >= 120 or any(buffer.rstrip().endswith(mark) for mark in ".?!"):
-                    first_audio = await self._synthesize_phrase(buffer, audio_queue, first_audio)
+                    first_audio = await self._synthesize_phrase(
+                        buffer, audio_queue, first_audio, item.turn_id, response_id
+                    )
                     buffer = ""
+        except QueueClosed:
+            return
         except Exception as exc:
             await self._provider_failed("tts", self.tts.name, exc)
             raise
         finally:
-            await audio_queue.put(None)
+            await audio_queue.put(
+                EndOfStream(
+                    call_id=self.call_id,
+                    turn_id=self.state.turn_id,
+                    response_id=response_id,
+                ),
+                bypass_cork=True,
+            )
         latency = (time.perf_counter() - started) * 1000
         STAGE_LATENCY.labels("tts", self.tts.name).observe(latency)
         await self.emit(
             EventType.TTS_COMPLETED,
             "tts",
-            payload={"latency_ms": latency, "queue_depth": audio_queue.depth},
+            payload={
+                "latency_ms": latency,
+                "queue_depth": audio_queue.depth_weight,
+                "depth_unit": audio_queue.depth_unit,
+            },
         )
 
     async def _synthesize_phrase(
         self,
         phrase: str,
-        audio_queue: BackpressureController[bytes | None],
+        audio_queue: FlowControlledQueue[AudioQueueItem],
         first_audio: bool,
+        turn_id: str,
+        response_id: str,
     ) -> bool:
+        if self._is_stale_response(turn_id, response_id):
+            await self._drop_stale_chunk(
+                "tts",
+                "text",
+                self._stale_reason(turn_id, response_id),
+                response_id=response_id,
+            )
+            return first_audio
         phrase_started = time.perf_counter()
+        sequence = 0
         with tracer.start_as_current_span("pipeline.tts") as span:
             set_span_attributes(
                 span,
                 call_id=self.call_id,
-                turn_id=self.state.turn_id,
+                turn_id=turn_id,
+                response_id=response_id,
                 stage="tts",
                 provider=self.tts.name,
                 model=self.tts.model,
@@ -441,16 +580,39 @@ class StreamModule:
                         self.tts.name, self.tts.model
                     ).observe(first_audio_latency)
                     await self.emit(EventType.TTS_FIRST_AUDIO, "tts")
-                await audio_queue.put(audio)
+                duration_ms = self._audio_duration_ms(audio)
+                if self._is_stale_response(turn_id, response_id):
+                    await self._drop_stale_chunk(
+                        "tts_to_transport",
+                        "audio",
+                        self._stale_reason(turn_id, response_id),
+                        audio_ms=duration_ms,
+                        response_id=response_id,
+                    )
+                    continue
+                sequence += 1
+                await audio_queue.wait_if_corked()
+                await audio_queue.put(
+                    AudioChunk(
+                        call_id=self.call_id,
+                        turn_id=turn_id,
+                        response_id=response_id,
+                        sequence=sequence,
+                        data=audio,
+                        sample_rate=self.settings.tts_output_sample_rate,
+                        duration_ms=duration_ms,
+                    )
+                )
                 audio_bytes += len(audio)
                 chunks += 1
-                self._set_queue_depth("tts_to_transport", audio_queue.depth)
+                self._set_queue_depth("tts_to_transport", audio_queue.depth_weight)
                 await self._send_pipeline_state()
             set_span_attributes(
                 span,
                 audio_bytes=audio_bytes,
                 audio_chunks=chunks,
-                queue_depth=audio_queue.depth,
+                queue_depth=audio_queue.depth_weight,
+                queue_depth_unit=audio_queue.depth_unit,
             )
         usage = self.tts.consume_usage()
         await self.emit(
@@ -482,52 +644,192 @@ class StreamModule:
         return first_audio
 
     async def _consume_transport(
-        self, audio_queue: BackpressureController[bytes | None]
+        self,
+        audio_queue: FlowControlledQueue[AudioQueueItem],
+        response_id: str,
     ) -> None:
         self.state.current_stage = "transport"
         bytes_sent = 0
         chunks_sent = 0
         while True:
-            audio = await audio_queue.get()
+            try:
+                item = await audio_queue.get()
+            except QueueClosed:
+                return
             audio_queue.task_done()
-            self._set_queue_depth("tts_to_transport", audio_queue.depth)
+            self._set_queue_depth("tts_to_transport", audio_queue.depth_weight)
             await self._send_pipeline_state()
-            if audio is None:
+            if isinstance(item, EndOfStream):
                 await self.emit(
                     EventType.TRANSPORT_AUDIO_SENT,
                     "transport",
                     payload={"bytes": bytes_sent, "chunks": chunks_sent, "queue_depth": 0},
                 )
                 return
-            await self.transport.send_audio(audio)
-            bytes_sent += len(audio)
+            if self._is_stale_chunk(item) or item.response_id != response_id:
+                await self._drop_stale_chunk(
+                    "transport",
+                    "audio",
+                    self._stale_reason(item.turn_id, item.response_id),
+                    audio_ms=item.duration_ms,
+                    response_id=item.response_id,
+                )
+                continue
+            await self.transport.send_audio(item.data)
+            bytes_sent += len(item.data)
             chunks_sent += 1
 
-    async def _on_backpressure(self, corked: bool, reason: str, depth: int) -> None:
-        self.state.corked = corked
-        self.state.cork_reason = reason if corked else None
-        event_type = EventType.PIPELINE_CORKED if corked else EventType.PIPELINE_UNCORKED
+    async def _on_backpressure(self, transition: BackpressureTransition) -> None:
+        self.state.backpressure[transition.stage] = BackpressureStageState(
+            corked=transition.corked,
+            hard_limited=transition.hard_limited,
+            depth=transition.depth,
+            depth_unit=transition.depth_unit,
+            item_count=transition.item_count,
+            reason_code=transition.reason_code if transition.corked else None,
+        )
+        self.state.corked = any(item.corked for item in self.state.backpressure.values())
+        self.state.cork_reason = transition.reason if self.state.corked else None
+        event_type = (
+            EventType.PIPELINE_HARD_LIMIT_REACHED
+            if transition.hard_limited
+            else EventType.PIPELINE_CORKED
+            if transition.corked
+            else EventType.PIPELINE_UNCORKED
+        )
         with tracer.start_as_current_span("pipeline.backpressure") as span:
             set_span_attributes(
                 span,
                 call_id=self.call_id,
                 turn_id=self.state.turn_id,
-                stage="backpressure",
-                corked=corked,
-                reason=reason,
-                queue_depth=depth,
+                stage=transition.stage,
+                corked=transition.corked,
+                hard_limited=transition.hard_limited,
+                reason_code=transition.reason_code,
+                queue_depth=transition.depth,
+                queue_depth_unit=transition.depth_unit,
+                queue_items=transition.item_count,
             )
             await self.emit(
                 event_type,
                 "backpressure",
-                payload={"reason": reason, "queue_depth": depth},
+                payload={
+                    "stage": transition.stage,
+                    "reason": transition.reason,
+                    "reason_code": transition.reason_code,
+                    "queue_depth": transition.depth,
+                    "depth_unit": transition.depth_unit,
+                    "item_count": transition.item_count,
+                    "hard_limited": transition.hard_limited,
+                },
             )
         await self.transport.send_json(
-            str(event_type), corked=corked, reason=reason, queue_depths=self.state.queue_depths
+            str(event_type),
+            corked=self.state.corked,
+            stage=transition.stage,
+            reason=transition.reason,
+            reason_code=transition.reason_code,
+            queue_depths=self.state.queue_depths,
+            backpressure=self.state.backpressure_payload(),
+        )
+        if (
+            transition.hard_limited
+            and self.settings.backpressure_hard_limit_policy == "cancel_response"
+        ):
+            response_id = self.state.active_response_id
+            if response_id:
+                await self._cancel_response(response_id, "queue_hard_limit")
+
+    def _set_queue_depth(self, stage: str, depth: float) -> None:
+        self.state.queue_depths[stage] = depth
+
+    def _estimate_speech_ms(self, text: str) -> float:
+        return len(text) / self.settings.speech_chars_per_second * 1000
+
+    def _audio_duration_ms(self, audio: bytes) -> float:
+        return len(audio) / (2 * self.settings.tts_output_sample_rate) * 1000
+
+    def _is_stale_response(self, turn_id: str, response_id: str) -> bool:
+        return not self._responses.is_response_active(response_id, turn_id)
+
+    def _is_stale_chunk(self, item: TextChunk | AudioChunk) -> bool:
+        return self._is_stale_response(item.turn_id, item.response_id)
+
+    def _stale_reason(self, turn_id: str, response_id: str) -> str:
+        if self._responses.is_response_cancelled(response_id):
+            return "response_cancelled"
+        if turn_id != self.state.turn_id:
+            return "stale_turn"
+        return "stale_response"
+
+    async def _drop_stale_chunk(
+        self,
+        stage: str,
+        chunk_type: str,
+        reason_code: str,
+        *,
+        response_id: str,
+        audio_ms: float = 0,
+    ) -> None:
+        STALE_CHUNKS_DROPPED_TOTAL.labels(stage, chunk_type, reason_code).inc()
+        if chunk_type == "audio" and audio_ms:
+            STALE_AUDIO_DROPPED_MS_TOTAL.labels(stage, reason_code).inc(audio_ms)
+        await self.emit(
+            EventType.PIPELINE_STALE_CHUNK_DROPPED,
+            stage,
+            payload={
+                "chunk_type": chunk_type,
+                "reason_code": reason_code,
+                "response_id": response_id,
+                "audio_ms": audio_ms,
+            },
         )
 
-    def _set_queue_depth(self, stage: str, depth: int) -> None:
-        self.state.queue_depths[stage] = depth
+    async def _cancel_response(self, response_id: str, reason_code: str) -> None:
+        if not self._responses.cancel_response(response_id, reason_code):
+            return
+        self.state.active_response_id = self._responses.active_response_id
+        text_queue = self._live_queues.get("llm_to_tts")
+        audio_queue = self._live_queues.get("tts_to_transport")
+        flushed_text = (
+            await text_queue.flush(
+                lambda item: isinstance(item, TextChunk) and item.response_id == response_id
+            )
+            if text_queue
+            else []
+        )
+        flushed_audio = (
+            await audio_queue.flush(
+                lambda item: isinstance(item, AudioChunk) and item.response_id == response_id
+            )
+            if audio_queue
+            else []
+        )
+        stale_audio_ms = sum(
+            item.duration_ms for item in flushed_audio if isinstance(item, AudioChunk)
+        )
+        if flushed_text:
+            STALE_CHUNKS_DROPPED_TOTAL.labels(
+                "llm_to_tts", "text", "response_cancelled"
+            ).inc(len(flushed_text))
+        if flushed_audio:
+            STALE_CHUNKS_DROPPED_TOTAL.labels(
+                "tts_to_transport", "audio", "response_cancelled"
+            ).inc(len(flushed_audio))
+            STALE_AUDIO_DROPPED_MS_TOTAL.labels(
+                "tts_to_transport", "response_cancelled"
+            ).inc(stale_audio_ms)
+        await self.emit(
+            EventType.PIPELINE_RESPONSE_CANCELLED,
+            "backpressure",
+            payload={
+                "response_id": response_id,
+                "reason_code": reason_code,
+                "flushed_text_items": len(flushed_text),
+                "flushed_audio_items": len(flushed_audio),
+                "stale_audio_ms": stale_audio_ms,
+            },
+        )
 
     def _expect_usage(self, turn_id: str, usage_type: str) -> None:
         if turn_id == "session":
@@ -558,6 +860,8 @@ class StreamModule:
                 "corked": self.state.corked,
                 "cork_reason": self.state.cork_reason,
                 "queue_depths": self.state.queue_depths,
+                "backpressure": self.state.backpressure_payload(),
+                "active_response_id": self.state.active_response_id,
             },
         )
 
@@ -601,6 +905,8 @@ class StreamModule:
                 "corked": self.state.corked,
                 "cork_reason": self.state.cork_reason,
                 "queue_depths": self.state.queue_depths,
+                "backpressure": self.state.backpressure_payload(),
+                "active_response_id": self.state.active_response_id,
             },
         )
         return event
