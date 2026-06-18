@@ -61,7 +61,7 @@ One session worker owns one active call. It owns:
 - `tenant_id`, `assistant_id`, `call_id`, current `turn_id`, and active `response_id`;
 - VAD and turn-detection state;
 - active STT, LLM, and TTS streams;
-- bounded token and audio queues;
+- weighted, response-fenced text and audio queues;
 - phrase buffering and playback progress;
 - barge-in, cancellation, and stale-response fencing; and
 - transient latency, queue-depth, and backpressure state.
@@ -76,7 +76,9 @@ The production-oriented hot path is:
 
 The session worker passes a finalized user turn directly to the LLM while publishing a
 coarse `stt.final_transcript` event asynchronously. The LLM stream feeds a bounded,
-turn-scoped phrase buffer. TTS audio feeds a bounded, turn-scoped transport queue.
+turn-scoped phrase buffer whose primary pressure signal is estimated queued
+speak-ahead duration. TTS audio feeds a bounded, turn-scoped transport queue whose
+primary pressure signal is queued playable audio duration.
 
 See [runtime_boundaries.md](runtime_boundaries.md) for ownership, cancellation, and
 barge-in semantics.
@@ -130,9 +132,9 @@ See [kafka_vs_temporal.md](kafka_vs_temporal.md) for the decision boundary.
 ## Backpressure
 
 Backpressure is an in-memory session-worker concern first. Each cross-stage queue is
-bounded and has high and low watermarks:
+bounded, weighted, and has high and low watermarks:
 
-1. A downstream queue reaches the high watermark.
+1. A downstream queue reaches the weighted high watermark.
 2. The session runtime marks that queue corked and pauses the producing coroutine at a
    safe boundary.
 3. Non-critical partial/debug updates may be coalesced.
@@ -140,9 +142,20 @@ bounded and has high and low watermarks:
 5. The downstream consumer drains the queue.
 6. At the low watermark, the session runtime uncorks production.
 
+`llm_to_tts` uses `queued_speak_ahead_ms`, estimated from text length and the configured
+speech characters-per-second budget. `tts_to_transport` uses `queued_audio_ms`,
+estimated from queued PCM duration. Item counts, character counts, and bytes are still
+useful debug metrics, but they are not the primary production corking signal.
+
+High/low hysteresis prevents flapping. A separate hard limit protects freshness: if too
+much future speech or playable audio accumulates, the session worker cancels or flushes
+the active response according to policy instead of silently buffering stale output.
+
 Important or prolonged degradation may emit `pipeline.corked` and
-`pipeline.uncorked` to Kafka for visibility. Routine transitions do not need to enter
-Temporal workflow history.
+`pipeline.uncorked` to Kafka for visibility. Hard limits may emit
+`pipeline.hard_limit_reached`. Kafka, Postgres, Prometheus, Grafana, Jaeger, and
+Temporal do not participate in the decision; routine transitions do not enter Temporal
+workflow history.
 
 Durable finalized events should not be lost once committed, but live token and audio
 buffers are bounded, turn-scoped, and cancellable. They may be discarded on barge-in,
@@ -255,7 +268,7 @@ flowchart LR
 | STT | Long-lived OpenAI Realtime transcription session receives resampled 24 kHz PCM, emits partial deltas, and is manually committed at the VAD turn boundary | Add provider cancellation, item-order reconciliation, domain evaluation, and fallback routing |
 | LLM | OpenAI streaming text deltas | Streaming adapter with response IDs, cancellation, tool-call normalization, and provider routing |
 | TTS | Phrase-triggered OpenAI PCM stream | Streaming adapter with cancellable response IDs and playback acknowledgements |
-| Backpressure | Real bounded token/audio queues and cork/uncork callbacks | Turn-scoped queues, explicit cancellation, partial coalescing, stale-item drops, and SLO-based escalation |
+| Backpressure | Weighted `llm_to_tts` speak-ahead and `tts_to_transport` audio-duration queues with response fences, stale drops, hard limits, and cork/uncork callbacks | Tune budgets from measured speech/playback rates, add browser playback acknowledgements, and route severe degradation to SLO escalation |
 | Kafka | Publishes coarse lifecycle, stage, provider, usage, and backpressure events; no raw frames, LLM tokens, or TTS chunks | Add schema registry, W3C headers, lag SLOs, and bounded asynchronous publication |
 | Postgres | Dedicated Kafka event worker projects calls, events, metrics, usage, billing, and idempotency outside the provider chain | Separate ingestion/query pools, reconciliation tooling, and tenant-aware retention |
 | Outbox | Billing events created from a DB usage projection are written atomically to the outbox and published once by the worker | Scale publishers with leases, stronger delivery metrics, and explicit event ownership |
@@ -287,7 +300,8 @@ consumers, Postgres writers, Temporal workflows/activities, and webhook delivery
 
 The primary user-facing latency measure is end-of-speech to first agent audio. Component
 metrics include STT final latency, LLM time to first token, TTS time to first audio byte,
-transport send lag, queue depths, cork duration, cancellation latency, stale chunks
-dropped, provider errors, Kafka lag, Postgres pool wait, and webhook retries.
+transport send lag, queued speak-ahead milliseconds, queued audio milliseconds, cork
+duration, cancellation latency, stale chunks dropped, provider errors, Kafka lag,
+Postgres pool wait, and webhook retries.
 
 See [otel_tracing.md](otel_tracing.md).

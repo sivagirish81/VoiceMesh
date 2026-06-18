@@ -14,10 +14,10 @@ It should remain in memory inside one per-call session worker. Kafka, Postgres, 
 Temporal may observe or react to the call, but they are not stage-to-stage transports.
 
 The session worker owns the active transport, provider streams, call and turn identity,
-bounded queues, playback state, cancellation tokens, barge-in state, and transient
-metrics. A worker crash ends the active media connection unless the transport layer can
-reconnect and rehydrate it; Temporal history cannot reconstruct an ephemeral provider
-socket or browser audio buffer.
+weighted bounded queues, playback state, cancellation tokens, barge-in state, and
+transient metrics. A worker crash ends the active media connection unless the transport
+layer can reconnect and rehydrate it; Temporal history cannot reconstruct an ephemeral
+provider socket or browser audio buffer.
 
 ## Current POC Runtime
 
@@ -28,13 +28,15 @@ socket or browser audio buffer.
 - keeps an OpenAI Realtime transcription WebSocket open for the call;
 - resamples browser PCM to 24 kHz, appends frames as speech arrives, displays transcript
   deltas, and commits the provider buffer at the VAD/end-turn boundary;
-- streams OpenAI LLM deltas into a bounded token queue;
+- streams OpenAI LLM deltas into a weighted text queue;
 - groups text at punctuation or a character threshold;
-- streams OpenAI TTS PCM into a bounded audio queue; and
+- streams OpenAI TTS PCM into a weighted audio-duration queue; and
 - sends audio to the browser over WebSocket.
 
-This is a real streaming vertical slice. The runtime does not yet implement
-full-duplex barge-in, response fencing, or cooperative provider cancellation.
+This is a real streaming vertical slice. The runtime now fences queued text/audio with
+`turn_id` and `response_id`, drops stale chunks, and can flush queues on cancellation.
+Full-duplex browser playback interruption and provider-native cancellation are still
+future production hardening.
 
 ## Streaming STT Boundary
 
@@ -90,7 +92,7 @@ When user speech begins while the agent is speaking:
 2. The transport stops playback for the active `response_id`.
 3. The TTS request is cancelled when supported.
 4. The LLM request is cancelled, or its remaining output is ignored.
-5. Token, phrase, and audio queues for the old response are drained or discarded.
+5. Text, phrase, and audio queues for the old response are flushed or discarded.
 6. Stale provider callbacks are rejected by the response fence.
 7. The next `turn_id` becomes active and incoming speech continues to STT.
 
@@ -102,9 +104,11 @@ survive once committed; live buffers may be thrown away when freshness requires 
 
 Backpressure operates locally:
 
-- token and audio queues are bounded;
-- high watermarks pause or coalesce upstream work;
+- `llm_to_tts` is bounded by estimated queued speak-ahead milliseconds;
+- `tts_to_transport` is bounded by queued playable audio milliseconds;
+- high watermarks pause upstream work before the queue is full;
 - low watermarks resume production;
+- hard limits cancel or flush stale response output according to policy;
 - queue ownership is turn-scoped;
 - cancellation releases waiters and drains obsolete work; and
 - prolonged pressure can emit a coarse Kafka event or fail the turn.

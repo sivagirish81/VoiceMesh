@@ -71,7 +71,7 @@ poor p95 or p99 that makes conversation feel unreliable.
 
 Track:
 
-- token queue depth and audio queue depth;
+- queued speak-ahead milliseconds and queued audio milliseconds;
 - cork and uncork count plus duration;
 - barge-in cancellation latency;
 - stale tokens and audio chunks dropped;
@@ -83,12 +83,12 @@ Track:
 - active calls, admission rejects, and per-tenant concurrency.
 
 The current POC exposes stage latency, LLM first-token latency, TTS first-audio latency,
-queue depth, backpressure transitions/duration, duplicates, provider failures, Kafka
-consumer lag, event-worker batch size/duration, Postgres projection latency/errors,
-Temporal workflow/activity counters, billing readiness observations, webhook delivery
-attempts, DB write failures, and active calls. It does not yet measure true
-end-of-speech to first audible client playback, barge-in cancellation latency, stale
-chunk drops, or Postgres pool wait.
+weighted queue depth, queue item count, hard-limit events, stale-chunk drops,
+backpressure transitions/duration, duplicates, provider failures, Kafka consumer lag,
+event-worker batch size/duration, Postgres projection latency/errors, Temporal
+workflow/activity counters, billing readiness observations, webhook delivery attempts,
+DB write failures, and active calls. It does not yet measure true end-of-speech to
+first audible client playback, browser stop-playback latency, or Postgres pool wait.
 
 ## Prometheus And Grafana Scope
 
@@ -97,12 +97,13 @@ provisioned from `infra/grafana/dashboards` and are organized around operational
 questions:
 
 - `VoiceMesh Overview`: active calls, call lifecycle rate, provider failures, latency,
-  queue depth, corking, Kafka lag, Postgres projection health, Temporal failures, and
-  webhook failures.
+  weighted queue depth, corking, Kafka lag, Postgres projection health, Temporal
+  failures, and webhook failures.
 - `VoiceMesh Live Pipeline Latency`: STT, LLM, TTS, and transport-lag proxy panels for
   the hot path.
-- `VoiceMesh Backpressure & Corking`: queue depth, cork/uncork counts, cork duration,
-  and the stages causing the most corking.
+- `VoiceMesh Backpressure & Corking`: queued speak-ahead/audio milliseconds, queue
+  items, hard-limit events, stale drops, cork/uncork counts, cork duration, and the
+  stages causing the most corking.
 - `VoiceMesh Provider Reliability`: provider failure/fallback and provider latency
   panels.
 - `VoiceMesh Kafka & Postgres Projection Health`: Kafka consumer lag, batch processing,
