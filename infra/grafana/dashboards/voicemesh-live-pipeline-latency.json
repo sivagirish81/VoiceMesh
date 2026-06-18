@@ -1,0 +1,21 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "panels": [
+    {"id": 1, "type": "timeseries", "title": "STT final latency histogram", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "histogram_quantile(0.50, sum by (le, provider) (rate(voicemesh_stage_latency_ms_bucket{stage=\"stt\"}[5m])))", "legendFormat": "p50 {{provider}}"}, {"expr": "histogram_quantile(0.95, sum by (le, provider) (rate(voicemesh_stage_latency_ms_bucket{stage=\"stt\"}[5m])))", "legendFormat": "p95 {{provider}}"}, {"expr": "histogram_quantile(0.99, sum by (le, provider) (rate(voicemesh_stage_latency_ms_bucket{stage=\"stt\"}[5m])))", "legendFormat": "p99 {{provider}}"}], "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}},
+    {"id": 2, "type": "timeseries", "title": "LLM first-token latency", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "histogram_quantile(0.50, sum by (le, provider, model) (rate(voicemesh_llm_first_token_latency_ms_bucket[5m])))", "legendFormat": "p50 {{provider}}/{{model}}"}, {"expr": "histogram_quantile(0.95, sum by (le, provider, model) (rate(voicemesh_llm_first_token_latency_ms_bucket[5m])))", "legendFormat": "p95 {{provider}}/{{model}}"}, {"expr": "histogram_quantile(0.99, sum by (le, provider, model) (rate(voicemesh_llm_first_token_latency_ms_bucket[5m])))", "legendFormat": "p99 {{provider}}/{{model}}"}], "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}},
+    {"id": 3, "type": "timeseries", "title": "LLM total response latency", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "histogram_quantile(0.50, sum by (le, provider) (rate(voicemesh_stage_latency_ms_bucket{stage=\"llm\"}[5m])))", "legendFormat": "p50 {{provider}}"}, {"expr": "histogram_quantile(0.95, sum by (le, provider) (rate(voicemesh_stage_latency_ms_bucket{stage=\"llm\"}[5m])))", "legendFormat": "p95 {{provider}}"}, {"expr": "histogram_quantile(0.99, sum by (le, provider) (rate(voicemesh_stage_latency_ms_bucket{stage=\"llm\"}[5m])))", "legendFormat": "p99 {{provider}}"}], "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}},
+    {"id": 4, "type": "timeseries", "title": "TTS first-audio-byte latency", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "histogram_quantile(0.50, sum by (le, provider, model) (rate(voicemesh_tts_first_audio_latency_ms_bucket[5m])))", "legendFormat": "p50 {{provider}}/{{model}}"}, {"expr": "histogram_quantile(0.95, sum by (le, provider, model) (rate(voicemesh_tts_first_audio_latency_ms_bucket[5m])))", "legendFormat": "p95 {{provider}}/{{model}}"}, {"expr": "histogram_quantile(0.99, sum by (le, provider, model) (rate(voicemesh_tts_first_audio_latency_ms_bucket[5m])))", "legendFormat": "p99 {{provider}}/{{model}}"}], "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}},
+    {"id": 5, "type": "timeseries", "title": "TTS completion latency", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "histogram_quantile(0.50, sum by (le, provider) (rate(voicemesh_stage_latency_ms_bucket{stage=\"tts\"}[5m])))", "legendFormat": "p50 {{provider}}"}, {"expr": "histogram_quantile(0.95, sum by (le, provider) (rate(voicemesh_stage_latency_ms_bucket{stage=\"tts\"}[5m])))", "legendFormat": "p95 {{provider}}"}, {"expr": "histogram_quantile(0.99, sum by (le, provider) (rate(voicemesh_stage_latency_ms_bucket{stage=\"tts\"}[5m])))", "legendFormat": "p99 {{provider}}"}], "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16}},
+    {"id": 6, "type": "timeseries", "title": "Transport send latency / lag proxy", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "voicemesh_queue_depth{stage=\"tts_to_transport\"}", "legendFormat": "tts_to_transport depth"}], "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16}}
+  ],
+  "refresh": "5s",
+  "schemaVersion": 40,
+  "tags": ["voicemesh", "latency", "prometheus"],
+  "templating": {"list": []},
+  "time": {"from": "now-30m", "to": "now"},
+  "timezone": "browser",
+  "title": "VoiceMesh Live Pipeline Latency",
+  "uid": "voicemesh-live-pipeline-latency",
+  "version": 1
+}

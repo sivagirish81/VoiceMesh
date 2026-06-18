@@ -306,6 +306,27 @@ should include STT final latency, LLM time to first token, TTS time to first aud
 transport lag, queue depth, cork duration, barge-in cancellation latency, stale chunks,
 provider errors, Kafka lag, Postgres pool wait, and webhook retries.
 
+Prometheus and Grafana are intentionally scoped to **live operational observability** in
+this pass. Grafana provisions Prometheus-only dashboards from
+`infra/grafana/dashboards`:
+
+- `VoiceMesh Overview`
+- `VoiceMesh Live Pipeline Latency`
+- `VoiceMesh Backpressure & Corking`
+- `VoiceMesh Provider Reliability`
+- `VoiceMesh Kafka & Postgres Projection Health`
+- `VoiceMesh Temporal Outer Loop`
+- `VoiceMesh Billing & Webhook Operational Health`
+
+Prometheus scrapes the API plus the event worker and Temporal worker metrics endpoints.
+Prometheus labels avoid high-cardinality identifiers such as `call_id`; use Jaeger,
+Kafka events, and Postgres rows for per-call debugging.
+
+ClickHouse is **not** part of the current stack. Future ClickHouse-backed dashboards may
+cover long-range tenant usage, provider cost analysis, historical call timelines,
+transcript/tool analytics, and arbitrary event exploration. Those warehouse-style
+queries are deliberately deferred.
+
 See [docs/otel_tracing.md](docs/otel_tracing.md).
 
 ## Documentation
@@ -356,4 +377,6 @@ See [docs/otel_tracing.md](docs/otel_tracing.md).
 - Customer tool/webhook delivery state and durable retry workflows
 - Local Whisper, Ollama, and Piper adapters
 - Provider invoice reconciliation and contract-aware pricing
-- Kafka lag, Postgres pool-wait, and end-of-speech-to-first-audio metrics
+- End-of-speech-to-first-audio and Postgres pool-wait metrics
+- Future ClickHouse analytical dashboards for long-range event, cost, transcript, and
+  tenant reporting

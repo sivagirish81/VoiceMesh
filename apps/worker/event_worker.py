@@ -9,6 +9,7 @@ from apps.api.events.kafka_consumer import ConsumedEvent, KafkaEventConsumer
 from apps.api.events.kafka_producer import KafkaEventProducer
 from apps.api.events.schemas import EventType, PipelineEvent
 from apps.api.failure_injection.injector import FailureInjector
+from apps.api.telemetry.metrics import start_metrics_http_server
 from apps.api.telemetry.tracing import configure_tracing
 from apps.api.temporal_client import TemporalLifecycleClient
 
@@ -19,6 +20,7 @@ CONSUMER_GROUP = "voicemesh-postgres-projector-v1"
 async def run_worker() -> None:
     settings = get_settings()
     configure_tracing("voicemesh-event-worker", settings.otel_exporter_otlp_endpoint)
+    start_metrics_http_server(settings.event_worker_metrics_port)
     injector = FailureInjector(settings)
     repository = PostgresRepository(
         settings.database_url,

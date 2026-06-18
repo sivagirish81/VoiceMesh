@@ -1,0 +1,22 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "panels": [
+    {"id": 1, "type": "text", "title": "Scope", "options": {"content": "Temporal is the durable outer loop. It is not in the VAD -> STT -> LLM -> TTS live media path.", "mode": "markdown"}, "gridPos": {"h": 3, "w": 24, "x": 0, "y": 0}},
+    {"id": 2, "type": "timeseries", "title": "Workflows started by type", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum by (workflow_type) (increase(voicemesh_temporal_workflows_total{status=\"started\"}[5m]))", "legendFormat": "{{workflow_type}}"}], "gridPos": {"h": 8, "w": 12, "x": 0, "y": 3}},
+    {"id": 3, "type": "timeseries", "title": "Workflows completed / failed by type", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum by (workflow_type, status) (increase(voicemesh_temporal_workflows_total{status!=\"started\"}[5m]))", "legendFormat": "{{workflow_type}} {{status}}"}], "gridPos": {"h": 8, "w": 12, "x": 12, "y": 3}},
+    {"id": 4, "type": "timeseries", "title": "Activity executions by activity/status", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum by (activity_name, status) (increase(voicemesh_temporal_activities_total[5m]))", "legendFormat": "{{activity_name}} {{status}}"}], "gridPos": {"h": 8, "w": 12, "x": 0, "y": 11}},
+    {"id": 5, "type": "timeseries", "title": "Activity duration p95", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "histogram_quantile(0.95, sum by (le, activity_name) (rate(voicemesh_temporal_activity_duration_seconds_bucket[5m])))", "legendFormat": "p95 {{activity_name}}"}], "gridPos": {"h": 8, "w": 12, "x": 12, "y": 11}},
+    {"id": 6, "type": "timeseries", "title": "Billing workflows waiting for readiness", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum by (state) (increase(voicemesh_billing_workflows_waiting_total[5m]))", "legendFormat": "{{state}}"}], "gridPos": {"h": 8, "w": 12, "x": 0, "y": 19}},
+    {"id": 7, "type": "timeseries", "title": "Webhook retry/failure activity", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum by (status) (increase(voicemesh_webhook_delivery_attempts_total[5m]))", "legendFormat": "{{status}}"}], "gridPos": {"h": 8, "w": 12, "x": 12, "y": 19}}
+  ],
+  "refresh": "5s",
+  "schemaVersion": 40,
+  "tags": ["voicemesh", "temporal", "prometheus"],
+  "templating": {"list": []},
+  "time": {"from": "now-30m", "to": "now"},
+  "timezone": "browser",
+  "title": "VoiceMesh Temporal Outer Loop",
+  "uid": "voicemesh-temporal-outer-loop",
+  "version": 1
+}

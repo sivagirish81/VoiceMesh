@@ -1,0 +1,23 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "panels": [
+    {"id": 1, "type": "timeseries", "title": "Kafka consumer lag by topic/group", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum by (topic, consumer_group) (voicemesh_kafka_consumer_lag)", "legendFormat": "{{topic}} {{consumer_group}}"}], "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}},
+    {"id": 2, "type": "timeseries", "title": "Events consumed per second", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum by (topic) (rate(voicemesh_kafka_events_consumed_total[1m]))", "legendFormat": "{{topic}}"}], "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}},
+    {"id": 3, "type": "timeseries", "title": "Event worker batch size", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "histogram_quantile(0.95, sum by (le, consumer_group) (rate(voicemesh_kafka_consumer_batch_size_bucket[5m])))", "legendFormat": "p95 {{consumer_group}}"}, {"expr": "sum by (consumer_group) (rate(voicemesh_kafka_consumer_batch_size_sum[5m])) / sum by (consumer_group) (rate(voicemesh_kafka_consumer_batch_size_count[5m]))", "legendFormat": "avg {{consumer_group}}"}], "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}},
+    {"id": 4, "type": "timeseries", "title": "Batch processing duration", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "histogram_quantile(0.95, sum by (le, consumer_group) (rate(voicemesh_kafka_consumer_batch_duration_seconds_bucket[5m])))", "legendFormat": "p95 {{consumer_group}}"}], "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}},
+    {"id": 5, "type": "timeseries", "title": "Events projected to Postgres per second", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum by (event_type) (rate(voicemesh_postgres_projected_events_total[1m]))", "legendFormat": "{{event_type}}"}], "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16}},
+    {"id": 6, "type": "timeseries", "title": "Postgres projection latency p95", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "histogram_quantile(0.95, sum by (le, operation) (rate(voicemesh_postgres_projection_duration_seconds_bucket[5m])))", "legendFormat": "p95 {{operation}}"}], "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16}},
+    {"id": 7, "type": "timeseries", "title": "Duplicate and dead-letter events", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum by (event_type) (increase(voicemesh_duplicate_events_total[5m]))", "legendFormat": "duplicate {{event_type}}"}, {"expr": "sum(rate(voicemesh_kafka_events_consumed_total{topic=\"dead-letter-events\"}[5m]))", "legendFormat": "dead-letter"}], "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24}},
+    {"id": 8, "type": "timeseries", "title": "Postgres write/projection failures", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "increase(voicemesh_db_write_failures_total[5m])", "legendFormat": "write failures"}, {"expr": "sum by (operation) (increase(voicemesh_postgres_projection_errors_total[5m]))", "legendFormat": "projection {{operation}}"}], "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24}}
+  ],
+  "refresh": "5s",
+  "schemaVersion": 40,
+  "tags": ["voicemesh", "kafka", "postgres", "prometheus"],
+  "templating": {"list": []},
+  "time": {"from": "now-30m", "to": "now"},
+  "timezone": "browser",
+  "title": "VoiceMesh Kafka & Postgres Projection Health",
+  "uid": "voicemesh-kafka-postgres-health",
+  "version": 1
+}

@@ -4,6 +4,7 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from apps.api.config import get_settings
+from apps.api.telemetry.metrics import start_metrics_http_server
 from apps.api.telemetry.tracing import configure_tracing
 from apps.worker.activities import (
     cancel_external_action,
@@ -37,6 +38,7 @@ from apps.worker.workflows import CallWorkflow
 async def run_worker() -> None:
     settings = get_settings()
     configure_tracing("voicemesh-temporal-worker", settings.otel_exporter_otlp_endpoint)
+    start_metrics_http_server(settings.temporal_worker_metrics_port)
     client = await Client.connect(
         settings.temporal_address, namespace=settings.temporal_namespace
     )

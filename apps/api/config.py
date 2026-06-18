@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     billing_missing_usage_policy: str = "FINALIZED_WITH_WARNINGS"
     kafka_consumer_batch_size: int = Field(default=100, ge=1)
     kafka_consumer_batch_timeout_ms: int = Field(default=500, ge=1)
+    event_worker_metrics_port: int = Field(default=9101, ge=1)
+    temporal_worker_metrics_port: int = Field(default=9102, ge=1)
     durable_action_default_timeout_seconds: int = Field(default=3600, ge=1)
     webhook_max_attempts: int = Field(default=5, ge=1)
     webhook_backoff_seconds: int = Field(default=2, ge=0)
