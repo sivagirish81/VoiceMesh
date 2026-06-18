@@ -23,7 +23,13 @@ from apps.api.providers.base import (
     STTProvider,
     TTSProvider,
 )
-from apps.api.telemetry.metrics import ACTIVE_CALLS, PROVIDER_FAILURES, STAGE_LATENCY
+from apps.api.telemetry.metrics import (
+    ACTIVE_CALLS,
+    LLM_FIRST_TOKEN_LATENCY,
+    PROVIDER_FAILURES,
+    STAGE_LATENCY,
+    TTS_FIRST_AUDIO_LATENCY,
+)
 from apps.api.telemetry.tracing import current_trace_id, set_span_attributes
 from apps.api.temporal_client import TemporalLifecycleClient
 from apps.api.websocket_transport import BrowserWebSocketTransport
@@ -308,6 +314,10 @@ class StreamModule:
                 async for token in generate_tokens(self.llm, transcript, {"call_id": self.call_id}):
                     if first:
                         first = False
+                        first_token_latency = (time.perf_counter() - started) * 1000
+                        LLM_FIRST_TOKEN_LATENCY.labels(
+                            self.llm.name, self.llm.model
+                        ).observe(first_token_latency)
                         await self.emit(EventType.LLM_FIRST_TOKEN, "llm")
                     response_parts.append(token)
                     await queue.put(token)
@@ -410,6 +420,7 @@ class StreamModule:
         audio_queue: BackpressureController[bytes | None],
         first_audio: bool,
     ) -> bool:
+        phrase_started = time.perf_counter()
         with tracer.start_as_current_span("pipeline.tts") as span:
             set_span_attributes(
                 span,
@@ -425,6 +436,10 @@ class StreamModule:
             async for audio in synthesize_audio(self.tts, phrase):
                 if first_audio:
                     first_audio = False
+                    first_audio_latency = (time.perf_counter() - phrase_started) * 1000
+                    TTS_FIRST_AUDIO_LATENCY.labels(
+                        self.tts.name, self.tts.model
+                    ).observe(first_audio_latency)
                     await self.emit(EventType.TTS_FIRST_AUDIO, "tts")
                 await audio_queue.put(audio)
                 audio_bytes += len(audio)

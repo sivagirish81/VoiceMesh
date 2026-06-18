@@ -51,13 +51,15 @@ class BackpressureController(Generic[T]):
 
     async def _observe(self) -> None:
         depth = self.depth
-        QUEUE_DEPTH.labels(self.call_id, self.stage).set(depth)
+        QUEUE_DEPTH.labels(self.stage).set(depth)
         async with self._lock:
             if not self.corked and depth >= self.high_watermark:
                 self.corked = True
                 self._corked_at = time.monotonic()
                 reason = f"{self.stage} queue depth {depth} reached high watermark"
-                BACKPRESSURE_TOTAL.labels(reason).inc()
+                BACKPRESSURE_TOTAL.labels(
+                    self.stage, "corked", "queue_high_watermark"
+                ).inc()
                 await self.on_state_change(True, reason, depth)
             elif self.corked and depth <= self.low_watermark:
                 reason = f"{self.stage} queue drained to low watermark"
@@ -67,5 +69,7 @@ class BackpressureController(Generic[T]):
                     )
                 self.corked = False
                 self._corked_at = None
+                BACKPRESSURE_TOTAL.labels(
+                    self.stage, "uncorked", "queue_low_watermark"
+                ).inc()
                 await self.on_state_change(False, reason, depth)
-

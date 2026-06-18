@@ -1,4 +1,5 @@
 import json
+import time
 from dataclasses import dataclass, field
 from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
@@ -9,7 +10,13 @@ from opentelemetry import trace
 from apps.api.db.repository import PostgresRepository
 from apps.api.events.kafka_consumer import ConsumedEvent
 from apps.api.events.schemas import EventType, PipelineEvent
-from apps.api.telemetry.metrics import DUPLICATE_EVENTS
+from apps.api.telemetry.metrics import (
+    CALL_EVENTS_TOTAL,
+    DUPLICATE_EVENTS,
+    POSTGRES_PROJECTED_EVENTS_TOTAL,
+    POSTGRES_PROJECTION_DURATION,
+    POSTGRES_PROJECTION_ERRORS_TOTAL,
+)
 from apps.api.telemetry.tracing import set_span_attributes
 
 tracer = trace.get_tracer(__name__)
@@ -123,6 +130,7 @@ class EventProjector:
                 return result
 
         with tracer.start_as_current_span("postgres.project_batch") as span:
+            started = time.perf_counter()
             set_span_attributes(
                 span,
                 batch_size=len(consumed_events),
@@ -130,6 +138,17 @@ class EventProjector:
             )
             result = await self._repository._retry(operation, critical=True)
             if result:
+                POSTGRES_PROJECTION_DURATION.labels("batch").observe(
+                    time.perf_counter() - started
+                )
+                for event in result.inserted_events:
+                    POSTGRES_PROJECTED_EVENTS_TOTAL.labels(str(event.event_type)).inc()
+                    if event.event_type in {
+                        EventType.CALL_STARTED,
+                        EventType.CALL_ENDED,
+                        EventType.CALL_FAILED,
+                    }:
+                        CALL_EVENTS_TOTAL.labels(str(event.event_type)).inc()
                 set_span_attributes(
                     span,
                     inserted_count=len(result.inserted_events),
@@ -137,6 +156,8 @@ class EventProjector:
                     affected_usage_calls=len(result.usage_projection_call_ids),
                     late_usage_calls=len(result.late_usage_call_ids),
                 )
+            else:
+                POSTGRES_PROJECTION_ERRORS_TOTAL.labels("batch").inc()
             return result
 
     async def _project_one(

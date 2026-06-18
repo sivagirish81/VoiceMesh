@@ -186,6 +186,8 @@ services:
       dockerfile: Dockerfile
     <<: *app-env
     command: ["python", "-m", "apps.worker.temporal_worker"]
+    expose:
+      - "9102"
     depends_on:
       postgres:
         condition: service_healthy
@@ -200,6 +202,8 @@ services:
       dockerfile: Dockerfile
     <<: *app-env
     command: ["python", "-m", "apps.worker.event_worker"]
+    expose:
+      - "9101"
     depends_on:
       postgres:
         condition: service_healthy

@@ -1,0 +1,22 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "panels": [
+    {"id": 1, "type": "text", "title": "Scope", "options": {"content": "Operational billing and webhook health only. Long-range cost analytics are deferred to future ClickHouse-backed dashboards.", "mode": "markdown"}, "gridPos": {"h": 3, "w": 24, "x": 0, "y": 0}},
+    {"id": 2, "type": "timeseries", "title": "Billing workflows started/completed/failed", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum by (workflow_type, status) (increase(voicemesh_temporal_workflows_total{workflow_type=~\"BillingFinalizationWorkflow|BillingAdjustmentWorkflow\"}[5m]))", "legendFormat": "{{workflow_type}} {{status}}"}], "gridPos": {"h": 8, "w": 12, "x": 0, "y": 3}},
+    {"id": 3, "type": "timeseries", "title": "Billing finalization latency p50 / p95", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "histogram_quantile(0.50, sum by (le, status) (rate(voicemesh_billing_finalization_duration_seconds_bucket[5m])))", "legendFormat": "p50 {{status}}"}, {"expr": "histogram_quantile(0.95, sum by (le, status) (rate(voicemesh_billing_finalization_duration_seconds_bucket[5m])))", "legendFormat": "p95 {{status}}"}], "gridPos": {"h": 8, "w": 12, "x": 12, "y": 3}},
+    {"id": 4, "type": "timeseries", "title": "Billing waiting states and warning finalizations", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum by (state) (increase(voicemesh_billing_workflows_waiting_total[5m]))", "legendFormat": "waiting {{state}}"}, {"expr": "sum(increase(voicemesh_temporal_workflows_total{workflow_type=\"BillingFinalizationWorkflow\",status=\"FINALIZED_WITH_WARNINGS\"}[5m]))", "legendFormat": "finalized with warnings"}], "gridPos": {"h": 8, "w": 12, "x": 0, "y": 11}},
+    {"id": 5, "type": "timeseries", "title": "Billing adjustment workflows", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum by (reason) (increase(voicemesh_billing_adjustments_total[5m]))", "legendFormat": "{{reason}}"}], "gridPos": {"h": 8, "w": 12, "x": 12, "y": 11}},
+    {"id": 6, "type": "timeseries", "title": "Webhook requested/delivered/failed state transitions", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum by (status) (increase(voicemesh_webhook_deliveries_total[5m]))", "legendFormat": "{{status}}"}], "gridPos": {"h": 8, "w": 12, "x": 0, "y": 19}},
+    {"id": 7, "type": "timeseries", "title": "Webhook attempts and delivery latency", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum by (status) (increase(voicemesh_webhook_delivery_attempts_total[5m]))", "legendFormat": "attempt {{status}}"}, {"expr": "histogram_quantile(0.95, sum by (le, status) (rate(voicemesh_webhook_delivery_duration_seconds_bucket[5m])))", "legendFormat": "p95 {{status}}"}], "gridPos": {"h": 8, "w": 12, "x": 12, "y": 19}}
+  ],
+  "refresh": "5s",
+  "schemaVersion": 40,
+  "tags": ["voicemesh", "billing", "webhook", "prometheus"],
+  "templating": {"list": []},
+  "time": {"from": "now-30m", "to": "now"},
+  "timezone": "browser",
+  "title": "VoiceMesh Billing & Webhook Operational Health",
+  "uid": "voicemesh-billing-webhook-health",
+  "version": 1
+}

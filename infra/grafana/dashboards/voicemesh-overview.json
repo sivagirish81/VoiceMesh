@@ -1,0 +1,26 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "panels": [
+    {"id": 1, "type": "stat", "title": "Active calls", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "voicemesh_active_calls"}], "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0}},
+    {"id": 2, "type": "timeseries", "title": "Calls started / ended / failed per minute", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum(rate(voicemesh_call_events_total{event_type=\"call.started\"}[1m]))", "legendFormat": "started"}, {"expr": "sum(rate(voicemesh_call_events_total{event_type=\"call.ended\"}[1m]))", "legendFormat": "ended"}, {"expr": "sum(rate(voicemesh_call_events_total{event_type=\"call.failed\"}[1m]))", "legendFormat": "failed"}], "gridPos": {"h": 8, "w": 18, "x": 6, "y": 0}},
+    {"id": 3, "type": "timeseries", "title": "STT final latency p50 / p95 / p99", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "histogram_quantile(0.50, sum by (le) (rate(voicemesh_stage_latency_ms_bucket{stage=\"stt\"}[5m])))", "legendFormat": "p50"}, {"expr": "histogram_quantile(0.95, sum by (le) (rate(voicemesh_stage_latency_ms_bucket{stage=\"stt\"}[5m])))", "legendFormat": "p95"}, {"expr": "histogram_quantile(0.99, sum by (le) (rate(voicemesh_stage_latency_ms_bucket{stage=\"stt\"}[5m])))", "legendFormat": "p99"}], "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8}},
+    {"id": 4, "type": "timeseries", "title": "LLM first-token latency p50 / p95 / p99", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "histogram_quantile(0.50, sum by (le) (rate(voicemesh_llm_first_token_latency_ms_bucket[5m])))", "legendFormat": "p50"}, {"expr": "histogram_quantile(0.95, sum by (le) (rate(voicemesh_llm_first_token_latency_ms_bucket[5m])))", "legendFormat": "p95"}, {"expr": "histogram_quantile(0.99, sum by (le) (rate(voicemesh_llm_first_token_latency_ms_bucket[5m])))", "legendFormat": "p99"}], "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8}},
+    {"id": 5, "type": "timeseries", "title": "TTS first-audio latency p50 / p95 / p99", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "histogram_quantile(0.50, sum by (le) (rate(voicemesh_tts_first_audio_latency_ms_bucket[5m])))", "legendFormat": "p50"}, {"expr": "histogram_quantile(0.95, sum by (le) (rate(voicemesh_tts_first_audio_latency_ms_bucket[5m])))", "legendFormat": "p95"}, {"expr": "histogram_quantile(0.99, sum by (le) (rate(voicemesh_tts_first_audio_latency_ms_bucket[5m])))", "legendFormat": "p99"}], "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8}},
+    {"id": 6, "type": "timeseries", "title": "Current queue depth by stage", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "voicemesh_queue_depth", "legendFormat": "{{stage}}"}], "gridPos": {"h": 8, "w": 8, "x": 0, "y": 16}},
+    {"id": 7, "type": "timeseries", "title": "Cork / uncork events by stage", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum by (stage, transition) (increase(voicemesh_backpressure_total[5m]))", "legendFormat": "{{stage}} {{transition}}"}], "gridPos": {"h": 8, "w": 8, "x": 8, "y": 16}},
+    {"id": 8, "type": "timeseries", "title": "Provider failures by stage/provider", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum by (stage, provider) (increase(voicemesh_provider_failures_total[5m]))", "legendFormat": "{{stage}}/{{provider}}"}], "gridPos": {"h": 8, "w": 8, "x": 16, "y": 16}},
+    {"id": 9, "type": "timeseries", "title": "Kafka consumer lag", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum by (topic, consumer_group) (voicemesh_kafka_consumer_lag)", "legendFormat": "{{topic}} {{consumer_group}}"}], "gridPos": {"h": 8, "w": 8, "x": 0, "y": 24}},
+    {"id": 10, "type": "timeseries", "title": "Postgres projection / write errors", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "increase(voicemesh_postgres_projection_errors_total[5m])", "legendFormat": "projection"}, {"expr": "increase(voicemesh_db_write_failures_total[5m])", "legendFormat": "writes"}], "gridPos": {"h": 8, "w": 8, "x": 8, "y": 24}},
+    {"id": 11, "type": "timeseries", "title": "Temporal workflow failures and webhook failures", "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum by (workflow_type) (increase(voicemesh_temporal_workflows_total{status=~\"FAILED|TIMED_OUT|NEEDS_REVIEW\"}[5m]))", "legendFormat": "workflow {{workflow_type}}"}, {"expr": "sum(increase(voicemesh_webhook_delivery_attempts_total{status=\"failed\"}[5m]))", "legendFormat": "webhook failed attempts"}], "gridPos": {"h": 8, "w": 8, "x": 16, "y": 24}}
+  ],
+  "refresh": "5s",
+  "schemaVersion": 40,
+  "tags": ["voicemesh", "operational", "prometheus"],
+  "templating": {"list": []},
+  "time": {"from": "now-30m", "to": "now"},
+  "timezone": "browser",
+  "title": "VoiceMesh Overview",
+  "uid": "voicemesh-overview",
+  "version": 1
+}

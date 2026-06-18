@@ -1,4 +1,5 @@
 import json
+import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
@@ -12,11 +13,32 @@ from temporalio import activity
 
 from apps.api.config import get_settings
 from apps.api.events.schemas import EventType, PipelineEvent
+from apps.api.telemetry.metrics import (
+    BILLING_ADJUSTMENTS_TOTAL,
+    BILLING_FINALIZATION_DURATION,
+    BILLING_WORKFLOWS_WAITING,
+    TEMPORAL_ACTIVITIES_TOTAL,
+    TEMPORAL_ACTIVITY_DURATION,
+    TEMPORAL_WORKFLOWS_TOTAL,
+    WEBHOOK_DELIVERIES_TOTAL,
+    WEBHOOK_DELIVERY_ATTEMPTS_TOTAL,
+    WEBHOOK_DELIVERY_DURATION,
+)
 from apps.api.telemetry.tracing import context_from_payload, set_span_attributes
 from apps.api.tools.http_config import cents, extract_json_path, render_template
 from apps.api.tools.models import DurableToolConfig, ExternalHttpConfig
 
 tracer = trace.get_tracer(__name__)
+
+
+def _activity_success(activity_name: str, started: float) -> None:
+    TEMPORAL_ACTIVITIES_TOTAL.labels(activity_name, "completed").inc()
+    TEMPORAL_ACTIVITY_DURATION.labels(activity_name).observe(time.perf_counter() - started)
+
+
+def _activity_failure(activity_name: str, started: float) -> None:
+    TEMPORAL_ACTIVITIES_TOTAL.labels(activity_name, "failed").inc()
+    TEMPORAL_ACTIVITY_DURATION.labels(activity_name).observe(time.perf_counter() - started)
 
 
 async def _execute(query: str, *args: Any) -> str:
@@ -253,6 +275,8 @@ async def mark_call_failed(data: dict[str, Any]) -> None:
 
 @activity.defn
 async def persist_tool_state(data: dict[str, Any]) -> None:
+    activity_name = "persist_tool_state"
+    started = time.perf_counter()
     with tracer.start_as_current_span(
         "temporal.activity.persist_tool_state",
         context=context_from_payload(data),
@@ -317,6 +341,9 @@ async def persist_tool_state(data: dict[str, Any]) -> None:
             data.get("cancel_reason"),
             terminal,
         )
+        _activity_success(activity_name, started)
+        if terminal:
+            TEMPORAL_WORKFLOWS_TOTAL.labels("DurableActionWorkflow", data["state"]).inc()
 
 
 @activity.defn
@@ -423,6 +450,8 @@ async def _call_external_action(
 
 @activity.defn
 async def create_external_action(data: dict[str, Any]) -> dict[str, Any]:
+    activity_name = "create_external_action"
+    started = time.perf_counter()
     with tracer.start_as_current_span(
         "temporal.activity.create_external_action",
         context=context_from_payload(data),
@@ -436,11 +465,19 @@ async def create_external_action(data: dict[str, Any]) -> dict[str, Any]:
             tool_invocation_id=data["tool_invocation_id"],
             activity_name="create_external_action",
         )
-        return await _call_external_action(data, action="create")
+        try:
+            result = await _call_external_action(data, action="create")
+            _activity_success(activity_name, started)
+            return result
+        except Exception:
+            _activity_failure(activity_name, started)
+            raise
 
 
 @activity.defn
 async def cancel_external_action(data: dict[str, Any]) -> dict[str, Any]:
+    activity_name = "cancel_external_action"
+    started = time.perf_counter()
     with tracer.start_as_current_span(
         "temporal.activity.cancel_external_action",
         context=context_from_payload(data),
@@ -455,11 +492,19 @@ async def cancel_external_action(data: dict[str, Any]) -> dict[str, Any]:
             external_request_id=data.get("external_request_id"),
             activity_name="cancel_external_action",
         )
-        return await _call_external_action(data, action="cancel")
+        try:
+            result = await _call_external_action(data, action="cancel")
+            _activity_success(activity_name, started)
+            return result
+        except Exception:
+            _activity_failure(activity_name, started)
+            raise
 
 
 @activity.defn
 async def get_external_action_status(data: dict[str, Any]) -> dict[str, Any]:
+    activity_name = "get_external_action_status"
+    started = time.perf_counter()
     with tracer.start_as_current_span(
         "temporal.activity.get_external_action_status",
         context=context_from_payload(data),
@@ -474,11 +519,19 @@ async def get_external_action_status(data: dict[str, Any]) -> dict[str, Any]:
             external_request_id=data.get("external_request_id"),
             activity_name="get_external_action_status",
         )
-        return await _call_external_action(data, action="status")
+        try:
+            result = await _call_external_action(data, action="status")
+            _activity_success(activity_name, started)
+            return result
+        except Exception:
+            _activity_failure(activity_name, started)
+            raise
 
 
 @activity.defn
 async def load_billing_readiness(data: dict[str, Any]) -> dict[str, Any]:
+    activity_name = "load_billing_readiness"
+    started = time.perf_counter()
     with tracer.start_as_current_span(
         "temporal.activity.load_billing_readiness",
         context=context_from_payload(data),
@@ -557,6 +610,13 @@ async def load_billing_readiness(data: dict[str, Any]) -> dict[str, Any]:
             missing_usage_types=missing,
             missing_expectations=missing_expectations,
         )
+        if not manifest:
+            BILLING_WORKFLOWS_WAITING.labels("WAITING_FOR_MANIFEST").inc()
+        elif not projection_caught_up:
+            BILLING_WORKFLOWS_WAITING.labels("WAITING_FOR_PROJECTION").inc()
+        elif missing or missing_expectations:
+            BILLING_WORKFLOWS_WAITING.labels("WAITING_FOR_USAGE").inc()
+        _activity_success(activity_name, started)
         return {
             "manifest_present": bool(manifest),
             "barrier_topic": manifest["barrier_topic"] if manifest else None,
@@ -574,6 +634,8 @@ async def load_billing_readiness(data: dict[str, Any]) -> dict[str, Any]:
 
 @activity.defn
 async def finalize_call_billing(data: dict[str, Any]) -> dict[str, Any]:
+    activity_name = "finalize_call_billing"
+    started = time.perf_counter()
     with tracer.start_as_current_span(
         "temporal.activity.finalize_call_billing",
         context=context_from_payload(data),
@@ -655,6 +717,9 @@ async def finalize_call_billing(data: dict[str, Any]) -> dict[str, Any]:
             billing_status=status,
             total_cost_cents=total_cost_cents,
         )
+        _activity_success(activity_name, started)
+        BILLING_FINALIZATION_DURATION.labels(status).observe(time.perf_counter() - started)
+        TEMPORAL_WORKFLOWS_TOTAL.labels("BillingFinalizationWorkflow", status).inc()
         return {
             "call_id": data["call_id"],
             "status": status,
@@ -670,6 +735,8 @@ async def finalize_call_billing(data: dict[str, Any]) -> dict[str, Any]:
 
 @activity.defn
 async def create_billing_adjustment(data: dict[str, Any]) -> dict[str, Any]:
+    activity_name = "create_billing_adjustment"
+    started = time.perf_counter()
     with tracer.start_as_current_span(
         "temporal.activity.create_billing_adjustment",
         context=context_from_payload(data),
@@ -732,6 +799,11 @@ async def create_billing_adjustment(data: dict[str, Any]) -> dict[str, Any]:
             recomputed_total_cost_cents=recomputed_total,
             delta_cost_cents=delta,
         )
+        _activity_success(activity_name, started)
+        BILLING_ADJUSTMENTS_TOTAL.labels(
+            data.get("reason", "late_usage_after_finalization")
+        ).inc()
+        TEMPORAL_WORKFLOWS_TOTAL.labels("BillingAdjustmentWorkflow", "CREATED").inc()
         return {
             "adjustment_id": str(adjustment_id),
             "call_id": data["call_id"],
@@ -775,6 +847,7 @@ async def emit_workflow_event(data: dict[str, Any]) -> None:
 
 @activity.defn
 async def persist_webhook_delivery(data: dict[str, Any]) -> None:
+    WEBHOOK_DELIVERIES_TOTAL.labels(str(data["status"])).inc()
     await _execute(
         """
         INSERT INTO webhook_deliveries (
@@ -813,6 +886,8 @@ async def persist_webhook_delivery(data: dict[str, Any]) -> None:
 
 @activity.defn
 async def deliver_webhook(data: dict[str, Any]) -> dict[str, Any]:
+    activity_name = "deliver_webhook"
+    started = time.perf_counter()
     attempt = int(data["attempt_number"])
     status_code: int | None = None
     error: str | None = None
@@ -851,4 +926,12 @@ async def deliver_webhook(data: dict[str, Any]) -> dict[str, Any]:
             "last_error": error,
         }
     )
+    status = "delivered" if success else "failed"
+    WEBHOOK_DELIVERY_ATTEMPTS_TOTAL.labels(status).inc()
+    WEBHOOK_DELIVERY_DURATION.labels(status).observe(time.perf_counter() - started)
+    if success:
+        _activity_success(activity_name, started)
+    else:
+        TEMPORAL_ACTIVITIES_TOTAL.labels(activity_name, "failed").inc()
+        TEMPORAL_ACTIVITY_DURATION.labels(activity_name).observe(time.perf_counter() - started)
     return {"success": success, "status_code": status_code, "error": error}

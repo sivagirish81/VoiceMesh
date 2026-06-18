@@ -2,7 +2,8 @@
 
 Observability must follow both the synchronous session runtime and asynchronous work.
 VoiceMesh exports locally through the OpenTelemetry Collector to Jaeger, Prometheus, and
-Grafana.
+Grafana. In the current architecture, Prometheus and Grafana are for live operational
+health, SLOs, and incident debugging. They are not the long-range analytical store.
 
 ## Trace Coverage
 
@@ -81,10 +82,56 @@ Track:
 - webhook delivery latency, retry count, and terminal failure; and
 - active calls, admission rejects, and per-tenant concurrency.
 
-The current POC exposes stage latency, queue depth, backpressure transitions/duration,
-duplicates, provider failures, DB write failures, and active calls. It does not yet
-measure end-of-speech to first audio, cancellation, stale drops, Kafka lag, Postgres
-pool wait, or webhook delivery.
+The current POC exposes stage latency, LLM first-token latency, TTS first-audio latency,
+queue depth, backpressure transitions/duration, duplicates, provider failures, Kafka
+consumer lag, event-worker batch size/duration, Postgres projection latency/errors,
+Temporal workflow/activity counters, billing readiness observations, webhook delivery
+attempts, DB write failures, and active calls. It does not yet measure true
+end-of-speech to first audible client playback, barge-in cancellation latency, stale
+chunk drops, or Postgres pool wait.
+
+## Prometheus And Grafana Scope
+
+Prometheus is the primary datasource for current Grafana dashboards. The dashboards are
+provisioned from `infra/grafana/dashboards` and are organized around operational
+questions:
+
+- `VoiceMesh Overview`: active calls, call lifecycle rate, provider failures, latency,
+  queue depth, corking, Kafka lag, Postgres projection health, Temporal failures, and
+  webhook failures.
+- `VoiceMesh Live Pipeline Latency`: STT, LLM, TTS, and transport-lag proxy panels for
+  the hot path.
+- `VoiceMesh Backpressure & Corking`: queue depth, cork/uncork counts, cork duration,
+  and the stages causing the most corking.
+- `VoiceMesh Provider Reliability`: provider failure/fallback and provider latency
+  panels.
+- `VoiceMesh Kafka & Postgres Projection Health`: Kafka consumer lag, batch processing,
+  projection throughput, projection latency, duplicates, dead-letter activity, and DB
+  failures.
+- `VoiceMesh Temporal Outer Loop`: workflow starts/completions/failures and activity
+  duration for durable outer-loop work only.
+- `VoiceMesh Billing & Webhook Operational Health`: billing finalization health,
+  waiting states, adjustments, webhook attempts, and webhook latency.
+
+Prometheus labels must remain stable and low-cardinality. Do not use `call_id`,
+`tenant_id`, transcript text, raw error strings, or free-form cork reasons as labels.
+Use labels such as `stage`, `provider`, `model`, `topic`, `consumer_group`,
+`transition`, and `reason_code`. Put high-cardinality identifiers in traces, logs,
+Kafka events, and Postgres projections instead.
+
+## Future ClickHouse Analytics
+
+VoiceMesh does not have ClickHouse yet. When added, ClickHouse should back analytical
+dashboards that are not appropriate for Prometheus:
+
+- call volume by tenant or assistant over long windows;
+- cost by provider, model, tenant, or customer;
+- historical usage trends across STT, LLM, and TTS providers;
+- full call event timelines and arbitrary event exploration;
+- transcript and tool analytics; and
+- historical failure analysis over months of events.
+
+Do not add those warehouse-style panels to the current Prometheus dashboards.
 
 ## Local Tooling
 
@@ -112,6 +159,6 @@ scrapes do not bury real call traces. Jaeger uses a local Badger volume
 (`jaeger-data`) instead of in-memory storage, so traces survive normal container
 restarts. Removing the Compose volume still deletes local trace history.
 
-Grafana at `http://localhost:3001` contains the local VoiceMesh dashboard. These Compose
-services demonstrate instrumentation flow; they are not a production observability
-deployment or retention design.
+Grafana at `http://localhost:3001` contains the local VoiceMesh dashboard folder. These
+Compose services demonstrate instrumentation flow; they are not a production
+observability deployment or retention design.

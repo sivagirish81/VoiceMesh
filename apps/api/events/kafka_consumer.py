@@ -11,6 +11,12 @@ from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
 from apps.api.events.schemas import EventType, PipelineEvent
+from apps.api.telemetry.metrics import (
+    KAFKA_BATCH_DURATION,
+    KAFKA_BATCH_SIZE,
+    KAFKA_CONSUMER_LAG,
+    KAFKA_EVENTS_CONSUMED_TOTAL,
+)
 from apps.api.telemetry.tracing import context_from_kafka_headers, set_span_attributes
 
 logger = logging.getLogger(__name__)
@@ -59,6 +65,7 @@ class KafkaEventConsumer:
                     timeout_ms=remaining_ms,
                     max_records=max(1, self._batch_size - len(buffered)),
                 )
+                self._observe_lag(records)
                 decoded = self._decode_records(records)
                 buffered.extend(decoded)
                 barrier_seen = any(
@@ -81,6 +88,8 @@ class KafkaEventConsumer:
                     kind=SpanKind.CONSUMER,
                 ) as span:
                     try:
+                        started = time.perf_counter()
+                        KAFKA_BATCH_SIZE.labels(self._group_id).observe(len(batch))
                         set_span_attributes(
                             span,
                             **{
@@ -95,6 +104,9 @@ class KafkaEventConsumer:
                         )
                         await self._handler(batch)
                         await self._commit_batch(batch)
+                        KAFKA_BATCH_DURATION.labels(self._group_id).observe(
+                            time.perf_counter() - started
+                        )
                     except Exception:
                         logger.exception("Kafka event batch handling failed")
                         raise
@@ -112,6 +124,11 @@ class KafkaEventConsumer:
                     kind=SpanKind.CONSUMER,
                 ) as span:
                     event = PipelineEvent.model_validate(json.loads(message.value))
+                    KAFKA_EVENTS_CONSUMED_TOTAL.labels(
+                        message.topic,
+                        str(event.event_type),
+                        self._group_id,
+                    ).inc()
                     set_span_attributes(
                         span,
                         **{
@@ -139,6 +156,21 @@ class KafkaEventConsumer:
                     )
                 )
         return batch
+
+    def _observe_lag(self, records: dict[TopicPartition, list[Any]]) -> None:
+        for topic_partition, messages in records.items():
+            if not messages:
+                continue
+            highwater = self._consumer.highwater(topic_partition)
+            if highwater is None:
+                continue
+            last_offset = max(message.offset for message in messages)
+            lag = max(0, int(highwater) - int(last_offset) - 1)
+            KAFKA_CONSUMER_LAG.labels(
+                topic_partition.topic,
+                str(topic_partition.partition),
+                self._group_id,
+            ).set(lag)
 
     async def _commit_batch(self, batch: list[ConsumedEvent]) -> None:
         offsets: dict[TopicPartition, int] = {}

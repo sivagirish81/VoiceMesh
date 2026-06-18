@@ -5,6 +5,7 @@ from temporalio.client import Client, WorkflowHandle
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from apps.api.config import Settings
+from apps.api.telemetry.metrics import TEMPORAL_WORKFLOWS_TOTAL
 from apps.api.telemetry.tracing import inject_trace_context
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ class TemporalLifecycleClient:
                 id=f"call-{call_id}",
                 task_queue=self._settings.temporal_task_queue,
             )
+            TEMPORAL_WORKFLOWS_TOTAL.labels("CallWorkflow", "started").inc()
             self._handles[call_id] = handle
         except WorkflowAlreadyStartedError:
             self._handles[call_id] = self.client.get_workflow_handle(f"call-{call_id}")
@@ -56,6 +58,7 @@ class TemporalLifecycleClient:
                 id=workflow_id,
                 task_queue=self._settings.temporal_task_queue,
             )
+            TEMPORAL_WORKFLOWS_TOTAL.labels("DurableActionWorkflow", "started").inc()
         except WorkflowAlreadyStartedError:
             pass
         return workflow_id
@@ -87,6 +90,7 @@ class TemporalLifecycleClient:
                 id=workflow_id,
                 task_queue=self._settings.temporal_task_queue,
             )
+            TEMPORAL_WORKFLOWS_TOTAL.labels("BillingFinalizationWorkflow", "started").inc()
         except WorkflowAlreadyStartedError:
             pass
         return workflow_id
@@ -116,6 +120,7 @@ class TemporalLifecycleClient:
                 id=workflow_id,
                 task_queue=self._settings.temporal_task_queue,
             )
+            TEMPORAL_WORKFLOWS_TOTAL.labels("BillingAdjustmentWorkflow", "started").inc()
         except WorkflowAlreadyStartedError:
             pass
         return workflow_id
@@ -131,6 +136,7 @@ class TemporalLifecycleClient:
                 id=workflow_id,
                 task_queue=self._settings.temporal_task_queue,
             )
+            TEMPORAL_WORKFLOWS_TOTAL.labels("WebhookDeliveryWorkflow", "started").inc()
         except WorkflowAlreadyStartedError:
             pass
         return workflow_id
