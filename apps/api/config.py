@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     barge_in_candidate_retention_ms: int = Field(default=1200, ge=100)
     barge_in_backchannel_policy: str = "medium"
     barge_in_interruption_sensitivity: str = "medium"
+    barge_in_backend_echo_grace_ms: int = Field(default=600, ge=0)
+    barge_in_backend_confirmation_ms: int = Field(default=350, ge=0)
+    barge_in_backend_min_speech_ratio: float = Field(default=0.75, ge=0, le=1)
     energy_vad_adaptive_noise_floor: bool = True
     energy_vad_noise_multiplier: float = Field(default=3.0, gt=1)
     energy_vad_noise_update_alpha: float = Field(default=0.05, gt=0, le=1)

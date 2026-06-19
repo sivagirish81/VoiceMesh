@@ -71,6 +71,28 @@ def test_confirmed_candidate_records_playback_cursor_on_cancel() -> None:
     assert coordinator.interrupted_responses["response-1"].played_audio_ms == 900
 
 
+def test_playback_done_clears_assistant_playing_state() -> None:
+    coordinator = BargeInCoordinator(call_id="call-1", candidate_retention_ms=1200)
+    coordinator.assistant_playing(turn_id="turn-1", response_id="response-1")
+
+    transition = coordinator.assistant_finished("response-1")
+
+    assert transition is not None
+    assert transition.reason_code == "playback_completed"
+    assert coordinator.state == "IDLE"
+    assert coordinator.active_response_id is None
+
+
+def test_playback_done_does_not_clear_pending_candidate() -> None:
+    coordinator = BargeInCoordinator(call_id="call-1", candidate_retention_ms=1200)
+    coordinator.assistant_playing(turn_id="turn-1", response_id="response-1")
+    coordinator.candidate(candidate())
+
+    assert coordinator.assistant_finished("response-1") is None
+    assert coordinator.state == "CANDIDATE"
+    assert coordinator.active_response_id == "response-1"
+
+
 @pytest.mark.parametrize(
     ("transcript", "semantic"),
     [

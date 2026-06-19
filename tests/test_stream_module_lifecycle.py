@@ -9,6 +9,7 @@ from apps.api.events.schemas import EventType
 from apps.api.pipeline.backpressure import DepthUnit, FlowControlledQueue
 from apps.api.pipeline.barge_in import BargeInCoordinator
 from apps.api.pipeline.events import AudioChunk, PipelineState, TextChunk
+from apps.api.pipeline.stages.vad import TurnUpdate, VADState
 from apps.api.pipeline.stream_module import ResponseController, StreamModule
 
 
@@ -68,6 +69,10 @@ def make_module(settings: Settings | None = None) -> StreamModule:
     module._response_text_by_id = {}
     module._response_estimated_ms_by_id = {}
     module._response_audio_sequences = {}
+    module._response_first_audio_at = {}
+    module._response_last_audio_sent_at = {}
+    module._response_transport_complete = set()
+    module._playback_done_response_ids = set()
     module._interrupted_response_ids = set()
     module._last_interruption = None
     module.llm = CancellableProvider()
@@ -180,3 +185,53 @@ async def test_confirmed_cancel_flushes_only_matching_response_and_skips_tempora
     assert response_id in module._interrupted_response_ids
     assert (await text_queue.get()).response_id == other_response_id
     assert module.temporal.signals == []
+
+
+@pytest.mark.asyncio
+async def test_backend_barge_in_confirmation_is_suppressed_during_echo_grace() -> None:
+    module = make_module(
+        Settings(
+            barge_in_backend_echo_grace_ms=600,
+            barge_in_backend_confirmation_ms=350,
+            barge_in_backend_min_speech_ratio=0.75,
+        )
+    )
+    response_id = module._responses.start_response("turn-1")
+    module.state.turn_id = "turn-1"
+    module.state.active_response_id = response_id
+    module._barge_in.assistant_playing(turn_id="turn-1", response_id=response_id)
+    module._response_first_audio_at[response_id] = time.monotonic()
+
+    await module._confirm_barge_in_from_vad(
+        TurnUpdate(
+            previous_state=VADState.STARTING,
+            state=VADState.SPEAKING,
+            started=True,
+            speech_duration_ms=500,
+            speech_frame_ratio=1.0,
+        )
+    )
+
+    assert response_id not in module._interrupted_response_ids
+    assert [event.event_type for event in module.producer.events] == []
+
+
+@pytest.mark.asyncio
+async def test_playback_done_clears_active_response_after_transport_completes() -> None:
+    module = make_module()
+    response_id = module._responses.start_response("turn-1")
+    module.state.active_response_id = response_id
+    module._barge_in.assistant_playing(turn_id="turn-1", response_id=response_id)
+    module._response_transport_complete.add(response_id)
+
+    await module._handle_playback_done(
+        {
+            "response_id": response_id,
+            "turn_id": "turn-1",
+            "last_played_sequence": 3,
+            "played_audio_ms": 900,
+        }
+    )
+
+    assert module.state.active_response_id is None
+    assert module._barge_in.active_response_id is None
