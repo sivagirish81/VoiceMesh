@@ -61,10 +61,35 @@ export default function DemoPage() {
   const audioContext = useRef<AudioContext | null>(null);
   const processor = useRef<ScriptProcessorNode | null>(null);
   const playbackAt = useRef(0);
+  const playbackSources = useRef<Set<AudioBufferSourceNode>>(new Set());
+
+  const stopPlayback = useCallback(() => {
+    playbackSources.current.forEach((source) => {
+      try {
+        source.stop();
+      } catch {
+        // The source may already have ended. Hang-up should still be best-effort immediate.
+      }
+      source.disconnect();
+    });
+    playbackSources.current.clear();
+    playbackAt.current = 0;
+  }, []);
+
+  const stopCapture = useCallback(() => {
+    if (processor.current) {
+      processor.current.onaudioprocess = null;
+      processor.current.disconnect();
+      processor.current = null;
+    }
+    stream.current?.getTracks().forEach((track) => track.stop());
+    stream.current = null;
+  }, []);
 
   const playPcm = useCallback((base64: string, sampleRate: number) => {
     const context = audioContext.current ?? new AudioContext();
     audioContext.current = context;
+    void context.resume();
     const binary = atob(base64);
     const bytes = new Uint8Array(binary.length);
     for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
@@ -77,10 +102,19 @@ export default function DemoPage() {
     source.connect(context.destination);
     const startAt = Math.max(context.currentTime + 0.03, playbackAt.current);
     source.start(startAt);
+    playbackSources.current.add(source);
+    source.onended = () => {
+      playbackSources.current.delete(source);
+      source.disconnect();
+    };
     playbackAt.current = startAt + buffer.duration;
   }, []);
 
   async function startCall() {
+    stopPlayback();
+    stopCapture();
+    websocket.current?.close();
+    websocket.current = null;
     const id = crypto.randomUUID();
     setCallId(id);
     setEvents([]);
@@ -89,9 +123,11 @@ export default function DemoPage() {
     setResponse("");
     setIgnoredNoiseTurns(0);
     setMicDebug({});
+    setPipeline({stage: "transport", corked: false, queue_depths: {}});
     const socket = new WebSocket(`${WS_URL}/ws/calls/${id}`);
     websocket.current = socket;
     socket.onopen = async () => {
+      if (websocket.current !== socket) return;
       setConnected(true);
       const media = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -131,6 +167,7 @@ export default function DemoPage() {
       setRecording(true);
     };
     socket.onmessage = (message) => {
+      if (websocket.current !== socket) return;
       const data = JSON.parse(message.data);
       if (data.type === "transcript.partial") {
         setPartialTranscript((current) => current + data.delta);
@@ -159,26 +196,39 @@ export default function DemoPage() {
       }
     };
     socket.onclose = () => {
+      if (websocket.current !== socket) return;
       setConnected(false);
       setRecording(false);
+      websocket.current = null;
     };
   }
 
   function stopCall() {
-    if (websocket.current?.readyState === WebSocket.OPEN) {
-      websocket.current.send(JSON.stringify({type: "audio.end_turn"}));
-      setTimeout(() => websocket.current?.send(JSON.stringify({type: "call.end"})), 100);
+    const socket = websocket.current;
+    websocket.current = null;
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({type: "call.end"}));
+      socket.close(1000, "call ended by user");
+    } else if (socket?.readyState === WebSocket.CONNECTING) {
+      socket.close(1000, "call ended by user");
     }
-    processor.current?.disconnect();
-    stream.current?.getTracks().forEach((track) => track.stop());
+    stopCapture();
+    stopPlayback();
+    void audioContext.current?.close();
+    audioContext.current = null;
+    setConnected(false);
     setRecording(false);
+    setCallId("");
+    setPartialTranscript("");
+    setPipeline({stage: "transport", corked: false, queue_depths: {}});
   }
 
   useEffect(() => () => {
     websocket.current?.close();
-    stream.current?.getTracks().forEach((track) => track.stop());
+    stopCapture();
+    stopPlayback();
     audioContext.current?.close();
-  }, []);
+  }, [stopCapture, stopPlayback]);
 
   return (
     <div className="stack">
@@ -190,7 +240,7 @@ export default function DemoPage() {
         </div>
         <div className="actions">
           <button className="button primary" disabled={connected} onClick={startCall}>Start microphone</button>
-          <button className="button danger" disabled={!recording} onClick={stopCall}>End call</button>
+          <button className="button danger" disabled={!recording && !connected} onClick={stopCall}>End call</button>
         </div>
       </section>
       <div className="grid three">
