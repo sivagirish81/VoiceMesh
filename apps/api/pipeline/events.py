@@ -69,6 +69,7 @@ class PipelineState:
     cork_reason: str | None = None
     queue_depths: dict[str, float] = field(default_factory=dict)
     backpressure: dict[str, BackpressureStageState] = field(default_factory=dict)
+    vad: dict[str, Any] = field(default_factory=dict)
     transcript: str = ""
     response: str = ""
     turn_id: str = "session"

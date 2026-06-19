@@ -28,12 +28,21 @@ from apps.api.pipeline.events import (
 )
 from apps.api.pipeline.stages.llm import generate_tokens
 from apps.api.pipeline.stages.tts import synthesize_audio
-from apps.api.pipeline.stages.vad import EnergyVADProvider, TurnDetector
+from apps.api.pipeline.stages.vad import (
+    EnergyVADProvider,
+    SileroVADProvider,
+    SmoothedTurnDetector,
+    TurnUpdate,
+    VADState,
+    WebRTCVADProvider,
+)
 from apps.api.providers.base import (
     LLMProvider,
     StreamingSTTSession,
     STTProvider,
     TTSProvider,
+    VADProvider,
+    VADResult,
 )
 from apps.api.telemetry.metrics import (
     ACTIVE_CALLS,
@@ -42,7 +51,15 @@ from apps.api.telemetry.metrics import (
     STAGE_LATENCY,
     STALE_AUDIO_DROPPED_MS_TOTAL,
     STALE_CHUNKS_DROPPED_TOTAL,
+    STT_TURNS_COMMITTED_TOTAL,
     TTS_FIRST_AUDIO_LATENCY,
+    VAD_ENDPOINT_DELAY,
+    VAD_ENERGY,
+    VAD_FRAMES_TOTAL,
+    VAD_NOISE_FLOOR,
+    VAD_NOISE_TURNS_IGNORED_TOTAL,
+    VAD_STATE_TRANSITIONS_TOTAL,
+    VAD_TURN_DURATION,
 )
 from apps.api.telemetry.tracing import current_trace_id, set_span_attributes
 from apps.api.temporal_client import TemporalLifecycleClient
@@ -108,11 +125,17 @@ class StreamModule:
         self.producer = producer
         self.temporal = temporal
         self.state = PipelineState(call_id=call_id)
-        self.vad = EnergyVADProvider(settings.vad_energy_threshold)
-        self.turn_detector = TurnDetector(settings.vad_silence_ms)
+        self.vad = self._create_vad_provider(settings)
+        self.turn_detector = SmoothedTurnDetector(
+            min_speech_ms=settings.vad_min_speech_ms,
+            end_silence_ms=settings.vad_end_silence_ms,
+            speech_pad_ms=settings.vad_speech_pad_ms,
+        )
         self._stt_session: StreamingSTTSession | None = None
         self._turn_has_audio = False
         self._turn_audio_bytes = 0
+        self._pending_vad_frames: list[AudioFrame] = []
+        self._turn_stats_by_id: dict[str, dict[str, float]] = {}
         self._turn_lock = asyncio.Lock()
         self._closed = False
         self._failed = False
@@ -120,6 +143,22 @@ class StreamModule:
         self._usage_expectations: dict[str, set[str]] = {}
         self._responses = ResponseController()
         self._live_queues: dict[str, FlowControlledQueue[Any]] = {}
+
+    def _create_vad_provider(self, settings: Settings) -> VADProvider:
+        if settings.vad_provider == "webrtc":
+            return WebRTCVADProvider(
+                mode=settings.webrtc_vad_mode,
+                sample_rate=settings.vad_sample_rate,
+                frame_ms=settings.vad_frame_ms,
+            )
+        if settings.vad_provider == "energy":
+            return EnergyVADProvider(
+                settings.vad_energy_threshold,
+                adaptive_noise_floor=settings.energy_vad_adaptive_noise_floor,
+                noise_multiplier=settings.energy_vad_noise_multiplier,
+                noise_update_alpha=settings.energy_vad_noise_update_alpha,
+            )
+        return SileroVADProvider()
 
     async def run(self) -> None:
         ACTIVE_CALLS.inc()
@@ -191,41 +230,111 @@ class StreamModule:
     async def _handle_audio(self, frame: AudioFrame) -> None:
         chunk_duration_ms = len(frame.data) / (2 * frame.sample_rate) * 1000
         with tracer.start_as_current_span("pipeline.vad") as span:
-            speech = await self.vad.detect_speech(frame.data)
+            try:
+                vad_result = await self.vad.detect_speech(frame.data, frame.sample_rate)
+            except Exception as exc:
+                await self.emit(
+                    EventType.VAD_PROVIDER_FAILED,
+                    "vad",
+                    payload={"provider": self.vad.name, "error": type(exc).__name__},
+                )
+                raise
+            update = self.turn_detector.update(vad_result)
+            self._record_vad_metrics(vad_result, update.previous_state, update.state)
+            self._update_vad_state(vad_result, update)
             set_span_attributes(
                 span,
                 call_id=self.call_id,
                 turn_id=self.state.turn_id,
                 stage="vad",
-                speech=speech,
+                provider=self.vad.name,
+                vad_decision=vad_result.speech,
+                vad_energy=vad_result.energy,
+                vad_noise_floor=vad_result.noise_floor,
+                vad_probability=vad_result.probability,
+                vad_state=update.state.value,
                 audio_bytes=len(frame.data),
                 sample_rate=frame.sample_rate,
                 chunk_duration_ms=chunk_duration_ms,
+                speech_started=update.started,
+                speech_ended=update.ended,
+                speech_duration_ms=update.speech_duration_ms,
+                speech_frame_ratio=update.speech_frame_ratio,
             )
-        started, ended = self.turn_detector.update(speech, chunk_duration_ms)
-        if started:
+        if update.state_changed:
+            await self.emit(
+                EventType.VAD_STATE_CHANGED,
+                "vad",
+                payload={
+                    "provider": self.vad.name,
+                    "from_state": update.previous_state.value,
+                    "to_state": update.state.value,
+                    "speech": vad_result.speech,
+                },
+            )
+        if update.state == VADState.QUIET and not update.ended:
+            self._pending_vad_frames.clear()
+        if update.state == VADState.STARTING:
+            self._pending_vad_frames.append(frame)
+        if update.started:
             if self.state.active_response_id:
                 await self._cancel_response(self.state.active_response_id, "barge_in")
             self.state.turn_id = str(uuid4())
             self._turn_has_audio = False
             self._turn_audio_bytes = 0
-            await self.emit(EventType.VAD_SPEECH_STARTED, "vad")
-        if self.turn_detector.speaking or ended:
-            self._turn_audio_bytes += len(frame.data)
-            if self._turn_audio_bytes > self.settings.websocket_max_audio_bytes:
-                raise ValueError("Audio turn exceeded maximum size")
-            if not self._stt_session:
-                raise RuntimeError("Streaming STT session is not available")
-            self._turn_has_audio = True
-            await self._stt_session.append_audio(frame.data, frame.sample_rate)
-        if ended:
-            await self.emit(EventType.VAD_SPEECH_ENDED, "vad")
+            if frame not in self._pending_vad_frames:
+                self._pending_vad_frames.append(frame)
+            for pending in self._pending_vad_frames:
+                await self._append_turn_audio(pending)
+            self._pending_vad_frames.clear()
+            await self.emit(
+                EventType.VAD_SPEECH_STARTED,
+                "vad",
+                payload={
+                    "provider": self.vad.name,
+                    "state": update.state.value,
+                    "speech_duration_ms": update.speech_duration_ms,
+                    "speech_frame_ratio": update.speech_frame_ratio,
+                },
+            )
+        elif update.collect_audio and update.state != VADState.STARTING:
+            await self._append_turn_audio(frame)
+        if update.ended:
+            self._turn_stats_by_id[self.state.turn_id] = {
+                "speech_duration_ms": update.speech_duration_ms,
+                "total_duration_ms": update.total_duration_ms,
+                "speech_frame_ratio": update.speech_frame_ratio,
+            }
+            VAD_ENDPOINT_DELAY.labels(self.vad.name).observe(
+                self.settings.vad_end_silence_ms / 1000
+            )
+            await self.emit(
+                EventType.VAD_SPEECH_ENDED,
+                "vad",
+                payload={
+                    "provider": self.vad.name,
+                    "state": update.state.value,
+                    "speech_duration_ms": update.speech_duration_ms,
+                    "total_duration_ms": update.total_duration_ms,
+                    "speech_frame_ratio": update.speech_frame_ratio,
+                },
+            )
             await self._finalize_turn()
+
+    async def _append_turn_audio(self, frame: AudioFrame) -> None:
+        self._turn_audio_bytes += len(frame.data)
+        if self._turn_audio_bytes > self.settings.websocket_max_audio_bytes:
+            raise ValueError("Audio turn exceeded maximum size")
+        if not self._stt_session:
+            raise RuntimeError("Streaming STT session is not available")
+        self._turn_has_audio = True
+        await self._stt_session.append_audio(frame.data, frame.sample_rate)
 
     async def _finalize_turn(self) -> None:
         if not self._turn_has_audio or self._turn_lock.locked():
             return
         turn_id = self.state.turn_id
+        self._turn_stats_by_id.setdefault(turn_id, self._current_turn_stats())
         self._turn_has_audio = False
         self._turn_audio_bytes = 0
         await self._process_turn(turn_id)
@@ -234,8 +343,11 @@ class StreamModule:
         async with self._turn_lock:
             self.state.turn_id = turn_id
             transcript = await self._run_stt(turn_id)
-            if not transcript.strip():
+            ignored_reason = self._noise_turn_reason(turn_id, transcript)
+            if ignored_reason:
+                await self._ignore_noise_turn(turn_id, ignored_reason)
                 return
+            self._record_turn_outcome(turn_id, "accepted")
             self.state.transcript = transcript
             await self.transport.send_json(
                 "transcript.final", call_id=self.call_id, turn_id=turn_id, text=transcript
@@ -274,6 +386,7 @@ class StreamModule:
             await self._provider_failed("stt", self.stt.name, exc)
             raise
         latency = (time.perf_counter() - started) * 1000
+        STT_TURNS_COMMITTED_TOTAL.labels(self.vad.name).inc()
         STAGE_LATENCY.labels("stt", self.stt.name).observe(latency)
         await self.emit(
             EventType.STT_FINAL_TRANSCRIPT,
@@ -312,6 +425,87 @@ class StreamModule:
             call_id=self.call_id,
             turn_id=self.state.turn_id,
             delta=delta,
+        )
+
+    def _record_vad_metrics(
+        self,
+        result: VADResult,
+        previous_state: VADState,
+        state: VADState,
+    ) -> None:
+        VAD_FRAMES_TOTAL.labels(result.provider, "speech" if result.speech else "silence").inc()
+        if result.energy is not None:
+            VAD_ENERGY.labels(result.provider).set(result.energy)
+        if result.noise_floor is not None:
+            VAD_NOISE_FLOOR.labels(result.provider).set(result.noise_floor)
+        if previous_state != state:
+            VAD_STATE_TRANSITIONS_TOTAL.labels(
+                result.provider,
+                previous_state.value,
+                state.value,
+            ).inc()
+
+    def _update_vad_state(self, result: VADResult, update: TurnUpdate) -> None:
+        self.state.vad = {
+            "provider": result.provider,
+            "state": update.state.value,
+            "decision": "speech" if result.speech else "silence",
+            "energy": result.energy,
+            "noise_floor": result.noise_floor,
+            "probability": result.probability,
+            "sample_rate": result.sample_rate,
+            "frame_duration_ms": result.frame_duration_ms,
+            "speech_duration_ms": update.speech_duration_ms,
+            "total_duration_ms": update.total_duration_ms,
+            "speech_frame_ratio": update.speech_frame_ratio,
+        }
+
+    def _current_turn_stats(self) -> dict[str, float]:
+        snapshot = self.turn_detector.snapshot()
+        return {
+            "speech_duration_ms": float(snapshot.get("speech_duration_ms", 0.0)),
+            "total_duration_ms": float(snapshot.get("total_duration_ms", 0.0)),
+            "speech_frame_ratio": float(snapshot.get("speech_frame_ratio", 0.0)),
+        }
+
+    def _noise_turn_reason(self, turn_id: str, transcript: str) -> str | None:
+        stats = self._turn_stats_by_id.get(turn_id) or self._current_turn_stats()
+        speech_duration_ms = stats.get("speech_duration_ms", 0.0)
+        speech_frame_ratio = stats.get("speech_frame_ratio", 0.0)
+        if speech_duration_ms < self.settings.vad_min_turn_audio_ms:
+            return "too_short"
+        if speech_frame_ratio < self.settings.vad_min_speech_frame_ratio:
+            return "low_speech_ratio"
+        if not transcript.strip():
+            return "empty_transcript"
+        return None
+
+    def _record_turn_outcome(self, turn_id: str, outcome: str) -> None:
+        stats = self._turn_stats_by_id.pop(turn_id, self._current_turn_stats())
+        total_duration_ms = max(stats.get("total_duration_ms", 0.0), 0.0)
+        VAD_TURN_DURATION.labels(self.vad.name, outcome).observe(total_duration_ms / 1000)
+
+    async def _ignore_noise_turn(self, turn_id: str, reason_code: str) -> None:
+        stats = self._turn_stats_by_id.get(turn_id, self._current_turn_stats())
+        self._record_turn_outcome(turn_id, "ignored")
+        VAD_NOISE_TURNS_IGNORED_TOTAL.labels(self.vad.name, reason_code).inc()
+        await self.emit(
+            EventType.VAD_NOISE_TURN_IGNORED,
+            "vad",
+            turn_id=turn_id,
+            payload={
+                "provider": self.vad.name,
+                "reason_code": reason_code,
+                "speech_duration_ms": stats.get("speech_duration_ms", 0.0),
+                "total_duration_ms": stats.get("total_duration_ms", 0.0),
+                "speech_frame_ratio": stats.get("speech_frame_ratio", 0.0),
+            },
+        )
+        await self.transport.send_json(
+            "vad.noise_turn_ignored",
+            call_id=self.call_id,
+            turn_id=turn_id,
+            reason_code=reason_code,
         )
 
     async def _run_llm_tts_transport(self, transcript: str) -> None:
@@ -861,6 +1055,7 @@ class StreamModule:
                 "cork_reason": self.state.cork_reason,
                 "queue_depths": self.state.queue_depths,
                 "backpressure": self.state.backpressure_payload(),
+                "vad": self.state.vad,
                 "active_response_id": self.state.active_response_id,
             },
         )
@@ -906,6 +1101,7 @@ class StreamModule:
                 "cork_reason": self.state.cork_reason,
                 "queue_depths": self.state.queue_depths,
                 "backpressure": self.state.backpressure_payload(),
+                "vad": self.state.vad,
                 "active_response_id": self.state.active_response_id,
             },
         )

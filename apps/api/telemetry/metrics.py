@@ -63,6 +63,48 @@ STALE_AUDIO_DROPPED_MS_TOTAL = Counter(
     "Playable stale audio duration dropped before transport",
     ["stage", "reason_code"],
 )
+VAD_FRAMES_TOTAL = Counter(
+    "voicemesh_vad_frames_total",
+    "VAD frames evaluated by provider decision",
+    ["provider", "decision"],
+)
+VAD_ENERGY = Gauge(
+    "voicemesh_vad_energy",
+    "Latest normalized VAD energy",
+    ["provider"],
+)
+VAD_NOISE_FLOOR = Gauge(
+    "voicemesh_vad_noise_floor",
+    "Latest adaptive VAD noise floor",
+    ["provider"],
+)
+VAD_STATE_TRANSITIONS_TOTAL = Counter(
+    "voicemesh_vad_state_transitions_total",
+    "Smoothed VAD state transitions",
+    ["provider", "from_state", "to_state"],
+)
+VAD_ENDPOINT_DELAY = Histogram(
+    "voicemesh_vad_endpoint_delay_seconds",
+    "Endpointing delay after speech before turn finalization",
+    ["provider"],
+    buckets=(0.05, 0.1, 0.2, 0.45, 0.7, 1.0, 1.5, 2.5, 5),
+)
+VAD_NOISE_TURNS_IGNORED_TOTAL = Counter(
+    "voicemesh_vad_noise_turns_ignored_total",
+    "Noise or weak turns ignored before LLM",
+    ["provider", "reason_code"],
+)
+VAD_TURN_DURATION = Histogram(
+    "voicemesh_vad_turn_duration_seconds",
+    "Accepted VAD turn duration by outcome",
+    ["provider", "outcome"],
+    buckets=(0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 40, 80),
+)
+STT_TURNS_COMMITTED_TOTAL = Counter(
+    "voicemesh_stt_turns_committed_total",
+    "STT turns committed after endpointing",
+    ["provider"],
+)
 
 CALL_EVENTS_TOTAL = Counter(
     "voicemesh_call_events_total",

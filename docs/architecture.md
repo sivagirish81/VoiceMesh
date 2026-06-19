@@ -17,7 +17,7 @@ flowchart LR
 
     subgraph HotPath["Per-call session worker: latency-sensitive hot path"]
       Session["Session runtime"]
-      VAD["VAD"]
+      VAD["WebRTC / pluggable VAD"]
       STT["Streaming STT adapter"]
       Turn["Turn finalizer"]
       LLM["Streaming LLM adapter"]
@@ -59,7 +59,7 @@ One session worker owns one active call. It owns:
 
 - the transport connection and media formats;
 - `tenant_id`, `assistant_id`, `call_id`, current `turn_id`, and active `response_id`;
-- VAD and turn-detection state;
+- VAD provider state, endpointing state, and noise-turn guardrails;
 - active STT, LLM, and TTS streams;
 - weighted, response-fenced text and audio queues;
 - phrase buffering and playback progress;
@@ -264,7 +264,7 @@ flowchart LR
 | Area | Current POC | Production direction |
 |---|---|---|
 | Transport | Browser WebSocket carrying PCM | Media gateway with WebRTC, SIP, or telephony adapters routing calls to session workers |
-| VAD | RMS energy over real PCM | WebRTC VAD, Silero, or provider-native endpointing with calibrated interruption handling |
+| VAD | WebRTC VAD over normalized PCM, smoothed endpointing, adaptive energy fallback, and STT guardrails for weak turns | Tune WebRTC mode/endpointing per environment, add provider-native endpointing and optional neural VAD such as Silero |
 | STT | Long-lived OpenAI Realtime transcription session receives resampled 24 kHz PCM, emits partial deltas, and is manually committed at the VAD turn boundary | Add provider cancellation, item-order reconciliation, domain evaluation, and fallback routing |
 | LLM | OpenAI streaming text deltas | Streaming adapter with response IDs, cancellation, tool-call normalization, and provider routing |
 | TTS | Phrase-triggered OpenAI PCM stream | Streaming adapter with cancellable response IDs and playback acknowledgements |

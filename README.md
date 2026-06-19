@@ -11,7 +11,7 @@ Postgres, OpenTelemetry, Jaeger, Prometheus, and Grafana.
 
 ## What It Demonstrates
 
-- Real `VAD → STT → LLM → TTS → Transport` execution
+- Real `VAD → STT → LLM → TTS → Transport` execution with WebRTC VAD endpointing
 - In-memory weighted queues with cork/uncork backpressure
 - Provider adapters that isolate the session runtime from concrete APIs
 - Kafka event streaming, replay, and duplicate-delivery experiments
@@ -61,9 +61,10 @@ barge-in state. Kafka provides coarse durable events and fanout. Postgres is the
 record. Temporal is optional for post-call and retry-heavy workflows; it is not part of
 normal streaming or cork/uncork.
 
-Read [docs/architecture.md](docs/architecture.md) for the full model and
+Read [docs/architecture.md](docs/architecture.md) for the full model,
 [docs/runtime_boundaries.md](docs/runtime_boundaries.md) for turn fencing, cancellation,
-and barge-in. See [docs/backpressure.md](docs/backpressure.md) for the hot-path
+and barge-in, and [docs/vad-and-endpointing.md](docs/vad-and-endpointing.md) for noisy
+environment tuning. See [docs/backpressure.md](docs/backpressure.md) for the hot-path
 flow-control model.
 
 ## Current POC
@@ -71,7 +72,14 @@ flow-control model.
 The working implementation intentionally has several simpler boundaries:
 
 - Browser WebSocket is the demo transport adapter.
-- VAD is RMS energy over real microphone PCM.
+- Browser microphone capture requests echo cancellation, noise suppression, and automatic
+  gain control where supported.
+- VAD defaults to WebRTC VAD over normalized 16 kHz PCM, with an adaptive RMS/energy VAD
+  fallback and an optional Silero extension point.
+- Endpointing uses a smoothed `QUIET → STARTING → SPEAKING → STOPPING` state machine, so
+  one noisy frame does not create a user turn.
+- Short, sparse, or empty-transcript turns are suppressed before LLM/TTS and surfaced as
+  `vad.noise_turn_ignored` observability events.
 - A long-lived OpenAI Realtime transcription session receives 24 kHz PCM continuously,
   emits partial deltas, and is committed at the detected turn boundary.
 - LLM and TTS stream through real bounded in-memory queues. `llm_to_tts` corks on
@@ -171,14 +179,17 @@ Open:
 1. Run `make up`.
 2. Open `http://localhost:3000/demo`.
 3. Select **Start microphone** and allow microphone access.
-4. Speak, then pause for roughly 700 ms.
+4. Speak, then pause for roughly 700 ms. In noisy spaces, watch the browser mic controls
+   and VAD debug cards to confirm the active provider, state, energy, and noise-floor
+   behavior.
 5. Watch partial STT text arrive while PCM is still streaming, then the final turn,
    LLM tokens, TTS audio, and browser playback.
 6. Open Jaeger, select `voicemesh-api`, filter operation `voice.call`, or paste the
    trace ID shown on the call detail page.
 
-The browser sends signed 16-bit PCM chunks. VAD measures real sample amplitude rather
-than using a timer. WebRTC VAD or Silero is the production migration path.
+The browser sends signed 16-bit PCM chunks. Browser constraints are a best-effort first
+defense; the backend still normalizes audio for WebRTC VAD and applies smoothed
+endpointing plus STT guardrails before the LLM sees a turn.
 
 ## Reliability Demos
 
@@ -190,6 +201,7 @@ make demo-db-down
 make demo-kill-worker
 make demo-durable-action-cancel
 make demo-billing-late-tts
+make demo-noise-vad
 ```
 
 ### TTS Backpressure
@@ -344,6 +356,7 @@ See [docs/otel_tracing.md](docs/otel_tracing.md).
 - [Architecture](docs/architecture.md)
 - [Runtime boundaries](docs/runtime_boundaries.md)
 - [Backpressure and corking](docs/backpressure.md)
+- [VAD and endpointing](docs/vad-and-endpointing.md)
 - [Event contracts](docs/events.md)
 - [Kafka versus Temporal](docs/kafka_vs_temporal.md)
 - [Temporal workflows](docs/temporal-workflows.md)
@@ -361,7 +374,9 @@ See [docs/otel_tracing.md](docs/otel_tracing.md).
 
 ## Known Limitations
 
-- RMS VAD is environment-sensitive and lacks production endpointing calibration.
+- WebRTC VAD is a lightweight local endpointing strategy; very noisy environments may
+  still require calibrated transport audio processing, provider-native endpointing, or a
+  future neural VAD such as Silero.
 - Browser capture uses `ScriptProcessorNode`; an AudioWorklet is the migration path.
 - Browser-level stop-playback on barge-in is still limited; server-side response
   fencing, stale-chunk drops, and queue flushing are implemented.

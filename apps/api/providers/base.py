@@ -25,9 +25,23 @@ class SpeechUsage:
     output_audio_seconds: float
 
 
+@dataclass(frozen=True, slots=True)
+class VADResult:
+    speech: bool
+    probability: float | None
+    energy: float | None
+    noise_floor: float | None
+    sample_rate: int
+    frame_duration_ms: float
+    provider: str
+    reason: str | None = None
+
+
 class VADProvider(ABC):
+    name: str
+
     @abstractmethod
-    async def detect_speech(self, audio_chunk: bytes) -> bool: ...
+    async def detect_speech(self, audio_chunk: bytes, sample_rate: int) -> VADResult: ...
 
 
 class StreamingSTTSession(ABC):
