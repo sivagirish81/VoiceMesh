@@ -53,6 +53,8 @@ type PlaybackCursor = {
   startedAt: number;
 };
 
+const BARGE_IN_ECHO_SUPPRESSION_MS = 350;
+
 function floatToInt16(input: Float32Array): ArrayBuffer {
   const output = new Int16Array(input.length);
   for (let index = 0; index < input.length; index += 1) {
@@ -80,6 +82,7 @@ export default function DemoPage() {
   const stream = useRef<MediaStream | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
   const processor = useRef<ScriptProcessorNode | null>(null);
+  const processorSink = useRef<GainNode | null>(null);
   const playbackAt = useRef(0);
   const playbackSources = useRef<Set<AudioBufferSourceNode>>(new Set());
   const activePlayback = useRef<PlaybackCursor | null>(null);
@@ -119,11 +122,31 @@ export default function DemoPage() {
     }));
   }, []);
 
+  const sendPlaybackDone = useCallback((responseId: string) => {
+    const socket = websocket.current;
+    const cursor = activePlayback.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN || !cursor) return;
+    if (cursor.responseId !== responseId) return;
+    sendPlaybackProgress();
+    socket.send(JSON.stringify({
+      type: "playback.done",
+      call_id: callIdRef.current,
+      turn_id: cursor.turnId,
+      response_id: cursor.responseId,
+      last_played_sequence: cursor.lastPlayedSequence,
+      played_audio_ms: cursor.playedAudioMs,
+    }));
+  }, [sendPlaybackProgress]);
+
   const stopCapture = useCallback(() => {
     if (processor.current) {
       processor.current.onaudioprocess = null;
       processor.current.disconnect();
       processor.current = null;
+    }
+    if (processorSink.current) {
+      processorSink.current.disconnect();
+      processorSink.current = null;
     }
     stream.current?.getTracks().forEach((track) => track.stop());
     stream.current = null;
@@ -171,16 +194,22 @@ export default function DemoPage() {
         active.lastPlayedSequence = Math.max(active.lastPlayedSequence, sequence);
         active.playedAudioMs += buffer.duration * 1000;
         sendPlaybackProgress();
+        if (playbackSources.current.size === 0) sendPlaybackDone(responseId);
       }
     };
     playbackAt.current = startAt + buffer.duration;
-  }, [sendPlaybackProgress]);
+  }, [sendPlaybackDone, sendPlaybackProgress]);
 
   const maybeSendBargeInCandidate = useCallback((samples: Float32Array) => {
     const socket = websocket.current;
     const cursor = activePlayback.current;
     if (!socket || socket.readyState !== WebSocket.OPEN || !cursor) return;
     if (playbackSources.current.size === 0) return;
+    const context = audioContext.current;
+    if (context) {
+      const playbackElapsedMs = (context.currentTime - cursor.startedAt) * 1000;
+      if (playbackElapsedMs < BARGE_IN_ECHO_SUPPRESSION_MS) return;
+    }
     let sum = 0;
     for (let index = 0; index < samples.length; index += 1) sum += samples[index] * samples[index];
     const rms = Math.sqrt(sum / Math.max(samples.length, 1));
@@ -190,7 +219,6 @@ export default function DemoPage() {
     if (now - lastSent < 1000) return;
     lastCandidateByResponse.current.set(cursor.responseId, now);
     stopPlayback();
-    const context = audioContext.current;
     const playedAudioMs = context
       ? Math.max(cursor.playedAudioMs, (context.currentTime - cursor.startedAt) * 1000)
       : cursor.playedAudioMs;
@@ -256,7 +284,10 @@ export default function DemoPage() {
       });
       const source = context.createMediaStreamSource(media);
       const node = context.createScriptProcessor(2048, 1, 1);
+      const mutedSink = context.createGain();
+      mutedSink.gain.value = 0;
       processor.current = node;
+      processorSink.current = mutedSink;
       socket.send(JSON.stringify({type: "audio.config", sample_rate: context.sampleRate, channels: 1}));
       node.onaudioprocess = (event) => {
         if (socket.readyState === WebSocket.OPEN) {
@@ -266,7 +297,8 @@ export default function DemoPage() {
         }
       };
       source.connect(node);
-      node.connect(context.destination);
+      node.connect(mutedSink);
+      mutedSink.connect(context.destination);
       setRecording(true);
     };
     socket.onmessage = (message) => {

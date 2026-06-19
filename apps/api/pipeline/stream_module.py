@@ -107,6 +107,12 @@ class ResponseController:
             self.active_response_id = None
         return True
 
+    def finish_response(self, response_id: str) -> bool:
+        if self.active_response_id != response_id:
+            return False
+        self.active_response_id = None
+        return True
+
     def is_response_cancelled(self, response_id: str) -> bool:
         return response_id in self.cancelled
 
@@ -166,6 +172,10 @@ class StreamModule:
         self._response_text_by_id: dict[str, str] = {}
         self._response_estimated_ms_by_id: dict[str, float] = {}
         self._response_audio_sequences: dict[str, int] = {}
+        self._response_first_audio_at: dict[str, float] = {}
+        self._response_last_audio_sent_at: dict[str, float] = {}
+        self._response_transport_complete: set[str] = set()
+        self._playback_done_response_ids: set[str] = set()
         self._interrupted_response_ids: set[str] = set()
         self._last_interruption: dict[str, Any] | None = None
 
@@ -231,6 +241,8 @@ class StreamModule:
                         await self._handle_barge_in_candidate(message)
                     elif message.get("type") == "playback.progress":
                         await self._handle_playback_progress(message)
+                    elif message.get("type") == "playback.done":
+                        await self._handle_playback_done(message)
                     elif message.get("type") == "call.end":
                         break
             except WebSocketDisconnect:
@@ -429,6 +441,19 @@ class StreamModule:
         if response_id in self._responses.cancelled:
             AUDIO_PLAYED_AFTER_CANCEL_MS.inc(cursor.played_audio_ms)
 
+    async def _handle_playback_done(self, message: dict[str, Any]) -> None:
+        response_id = str(message.get("response_id") or "")
+        if not response_id:
+            return
+        self._playback_done_response_ids.add(response_id)
+        self._barge_in.playback_progress(
+            turn_id=str(message.get("turn_id") or ""),
+            response_id=response_id,
+            last_played_sequence=int(message.get("last_played_sequence") or 0),
+            played_audio_ms=float(message.get("played_audio_ms") or 0.0),
+        )
+        self._finish_response_if_playback_done(response_id)
+
     async def _maybe_reject_barge_in_candidate(self, reason_code: str) -> None:
         transition = self._barge_in.reject(reason_code) or self._barge_in.reject_expired()
         if transition:
@@ -452,9 +477,22 @@ class StreamModule:
         response_id = self.state.active_response_id
         if not response_id:
             return
-        if update.speech_duration_ms < self.settings.barge_in_confirmation_ms:
+        has_client_candidate = self._barge_in.current_candidate is not None
+        confirmation_ms = (
+            self.settings.barge_in_confirmation_ms
+            if has_client_candidate
+            else self.settings.barge_in_backend_confirmation_ms
+        )
+        min_speech_ratio = (
+            self.settings.barge_in_min_speech_ratio
+            if has_client_candidate
+            else self.settings.barge_in_backend_min_speech_ratio
+        )
+        if update.speech_duration_ms < confirmation_ms:
             return
-        if update.speech_frame_ratio < self.settings.barge_in_min_speech_ratio:
+        if update.speech_frame_ratio < min_speech_ratio:
+            return
+        if not has_client_candidate and self._is_in_backend_barge_in_echo_grace(response_id):
             return
         if not self._barge_in.current_candidate:
             self._barge_in.backend_candidate(turn_id=self.state.turn_id, response_id=response_id)
@@ -472,6 +510,7 @@ class StreamModule:
                 reason_code=transition.reason_code,
                 speech_duration_ms=update.speech_duration_ms,
                 speech_frame_ratio=update.speech_frame_ratio,
+                client_candidate=has_client_candidate,
             )
         BARGE_IN_CONFIRMED_TOTAL.labels(transition.reason_code).inc()
         BARGE_IN_CONFIRMATION_LATENCY.labels(transition.reason_code).observe(
@@ -489,6 +528,17 @@ class StreamModule:
             },
         )
         await self._cancel_response(response_id, "barge_in_confirmed")
+
+    def _is_in_backend_barge_in_echo_grace(self, response_id: str) -> bool:
+        grace_seconds = self.settings.barge_in_backend_echo_grace_ms / 1000
+        if grace_seconds <= 0:
+            return False
+        now = time.monotonic()
+        first_audio_at = self._response_first_audio_at.get(response_id)
+        if first_audio_at is not None and now - first_audio_at < grace_seconds:
+            return True
+        last_audio_sent_at = self._response_last_audio_sent_at.get(response_id)
+        return last_audio_sent_at is not None and now - last_audio_sent_at < grace_seconds
 
     async def _append_turn_audio(self, frame: AudioFrame) -> None:
         self._turn_audio_bytes += len(frame.data)
@@ -790,6 +840,10 @@ class StreamModule:
         self._response_text_by_id[response_id] = ""
         self._response_estimated_ms_by_id[response_id] = 0.0
         self._response_audio_sequences[response_id] = 0
+        self._response_first_audio_at.pop(response_id, None)
+        self._response_last_audio_sent_at.pop(response_id, None)
+        self._response_transport_complete.discard(response_id)
+        self._playback_done_response_ids.discard(response_id)
         token_queue: FlowControlledQueue[TextQueueItem] = FlowControlledQueue(
             call_id=self.call_id,
             stage="llm_to_tts",
@@ -1079,6 +1133,7 @@ class StreamModule:
             async for audio in synthesize_audio(self.tts, phrase):
                 if first_audio:
                     first_audio = False
+                    self._response_first_audio_at.setdefault(response_id, time.monotonic())
                     first_audio_latency = (time.perf_counter() - phrase_started) * 1000
                     TTS_FIRST_AUDIO_LATENCY.labels(
                         self.tts.name, self.tts.model
@@ -1165,6 +1220,8 @@ class StreamModule:
             self._set_queue_depth("tts_to_transport", audio_queue.depth_weight)
             await self._send_pipeline_state()
             if isinstance(item, EndOfStream):
+                self._response_transport_complete.add(response_id)
+                self._finish_response_if_playback_done(response_id)
                 await self.emit(
                     EventType.TRANSPORT_AUDIO_SENT,
                     "transport",
@@ -1188,8 +1245,21 @@ class StreamModule:
                 sequence=item.sequence,
                 sample_rate=item.sample_rate,
             )
+            self._response_first_audio_at.setdefault(response_id, time.monotonic())
+            self._response_last_audio_sent_at[response_id] = time.monotonic()
             bytes_sent += len(item.data)
             chunks_sent += 1
+
+    def _finish_response_if_playback_done(self, response_id: str) -> None:
+        if response_id not in self._response_transport_complete:
+            return
+        if response_id not in self._playback_done_response_ids:
+            return
+        if response_id in self._responses.cancelled:
+            return
+        if self._responses.finish_response(response_id):
+            self.state.active_response_id = self._responses.active_response_id
+            self._barge_in.assistant_finished(response_id)
 
     async def _on_backpressure(self, transition: BackpressureTransition) -> None:
         self.state.backpressure[transition.stage] = BackpressureStageState(

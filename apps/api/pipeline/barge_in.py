@@ -82,6 +82,22 @@ class BargeInCoordinator:
         if self.state not in {BargeInState.CANDIDATE, BargeInState.CONFIRMED}:
             self.state = BargeInState.ASSISTANT_PLAYING
 
+    def assistant_finished(self, response_id: str) -> BargeInTransition | None:
+        if response_id != self.active_response_id:
+            return None
+        if self.current_candidate and self.current_candidate.response_id == response_id:
+            return None
+        self.active_turn_id = None
+        self.active_response_id = None
+        self.playback_cursor = None
+        if self.state == BargeInState.ASSISTANT_PLAYING:
+            self.state = BargeInState.IDLE
+        return BargeInTransition(
+            state=self.state,
+            reason_code="playback_completed",
+            response_id=response_id,
+        )
+
     def playback_progress(
         self,
         *,

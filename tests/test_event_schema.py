@@ -50,3 +50,23 @@ def test_usage_and_billing_events_have_dedicated_topics() -> None:
     assert topic_for_event(EventType.BILLING_ADJUSTMENT_CREATED) == "billing-events"
     assert topic_for_event(EventType.TOOL_ACTION_REQUESTED) == "tool-events"
     assert topic_for_event(EventType.WEBHOOK_DELIVERED) == "webhook-events"
+
+
+def test_barge_in_events_project_to_pipeline_topic() -> None:
+    for event_type in (
+        EventType.USER_BARGE_IN_CANDIDATE,
+        EventType.USER_BARGE_IN_CONFIRMED,
+        EventType.USER_BARGE_IN_REJECTED,
+        EventType.USER_BARGE_IN_CLASSIFIED,
+        EventType.PIPELINE_PLAYBACK_STOPPED,
+        EventType.PIPELINE_RESPONSE_CANCELLED,
+    ):
+        event = PipelineEvent.create(
+            call_id="call-1",
+            turn_id="turn-1",
+            event_type=event_type,
+            stage="barge_in",
+            sequence_number=1,
+        )
+        assert event.event_type == event_type
+        assert topic_for_event(event_type) == "pipeline-events"
