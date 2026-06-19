@@ -18,6 +18,12 @@ from apps.api.pipeline.backpressure import (
     FlowControlledQueue,
     QueueClosed,
 )
+from apps.api.pipeline.barge_in import (
+    BargeInCandidate,
+    BargeInCoordinator,
+    BargeInSemantic,
+    classify_interruption,
+)
 from apps.api.pipeline.events import (
     AudioChunk,
     AudioFrame,
@@ -46,6 +52,15 @@ from apps.api.providers.base import (
 )
 from apps.api.telemetry.metrics import (
     ACTIVE_CALLS,
+    AUDIO_PLAYED_AFTER_CANCEL_MS,
+    BARGE_IN_BACKEND_CANCEL_LATENCY,
+    BARGE_IN_CANDIDATES_TOTAL,
+    BARGE_IN_CLASSIFICATION_LATENCY,
+    BARGE_IN_CONFIRMATION_LATENCY,
+    BARGE_IN_CONFIRMED_TOTAL,
+    BARGE_IN_PLAYBACK_STOP_LATENCY,
+    BARGE_IN_REJECTED_TOTAL,
+    INTERRUPTED_RESPONSE_SPOKEN_RATIO,
     LLM_FIRST_TOKEN_LATENCY,
     PROVIDER_FAILURES,
     STAGE_LATENCY,
@@ -143,6 +158,16 @@ class StreamModule:
         self._usage_expectations: dict[str, set[str]] = {}
         self._responses = ResponseController()
         self._live_queues: dict[str, FlowControlledQueue[Any]] = {}
+        self._barge_in = BargeInCoordinator(
+            call_id=call_id,
+            candidate_retention_ms=settings.barge_in_candidate_retention_ms,
+        )
+        self._conversation: list[dict[str, Any]] = []
+        self._response_text_by_id: dict[str, str] = {}
+        self._response_estimated_ms_by_id: dict[str, float] = {}
+        self._response_audio_sequences: dict[str, int] = {}
+        self._interrupted_response_ids: set[str] = set()
+        self._last_interruption: dict[str, Any] | None = None
 
     def _create_vad_provider(self, settings: Settings) -> VADProvider:
         if settings.vad_provider == "webrtc":
@@ -202,6 +227,10 @@ class StreamModule:
                         await self._finalize_turn()
                     elif message.get("type") == "client.ping":
                         await self.transport.send_json("client.pong")
+                    elif message.get("type") == "client.barge_in_candidate":
+                        await self._handle_barge_in_candidate(message)
+                    elif message.get("type") == "playback.progress":
+                        await self._handle_playback_progress(message)
                     elif message.get("type") == "call.end":
                         break
             except WebSocketDisconnect:
@@ -229,38 +258,39 @@ class StreamModule:
 
     async def _handle_audio(self, frame: AudioFrame) -> None:
         chunk_duration_ms = len(frame.data) / (2 * frame.sample_rate) * 1000
-        with tracer.start_as_current_span("pipeline.vad") as span:
-            try:
-                vad_result = await self.vad.detect_speech(frame.data, frame.sample_rate)
-            except Exception as exc:
-                await self.emit(
-                    EventType.VAD_PROVIDER_FAILED,
-                    "vad",
-                    payload={"provider": self.vad.name, "error": type(exc).__name__},
-                )
-                raise
-            update = self.turn_detector.update(vad_result)
-            self._record_vad_metrics(vad_result, update.previous_state, update.state)
-            self._update_vad_state(vad_result, update)
-            set_span_attributes(
-                span,
-                call_id=self.call_id,
-                turn_id=self.state.turn_id,
-                stage="vad",
-                provider=self.vad.name,
-                vad_decision=vad_result.speech,
-                vad_energy=vad_result.energy,
-                vad_noise_floor=vad_result.noise_floor,
-                vad_probability=vad_result.probability,
-                vad_state=update.state.value,
-                audio_bytes=len(frame.data),
-                sample_rate=frame.sample_rate,
-                chunk_duration_ms=chunk_duration_ms,
-                speech_started=update.started,
-                speech_ended=update.ended,
-                speech_duration_ms=update.speech_duration_ms,
-                speech_frame_ratio=update.speech_frame_ratio,
+        try:
+            vad_result = await self.vad.detect_speech(frame.data, frame.sample_rate)
+        except Exception as exc:
+            await self.emit(
+                EventType.VAD_PROVIDER_FAILED,
+                "vad",
+                payload={"provider": self.vad.name, "error": type(exc).__name__},
             )
+            raise
+        update = self.turn_detector.update(vad_result)
+        self._record_vad_metrics(vad_result, update.previous_state, update.state)
+        self._update_vad_state(vad_result, update)
+        if update.state_changed or update.started or update.ended:
+            with tracer.start_as_current_span("pipeline.vad") as span:
+                set_span_attributes(
+                    span,
+                    call_id=self.call_id,
+                    turn_id=self.state.turn_id,
+                    stage="vad",
+                    provider=self.vad.name,
+                    vad_decision=vad_result.speech,
+                    vad_energy=vad_result.energy,
+                    vad_noise_floor=vad_result.noise_floor,
+                    vad_probability=vad_result.probability,
+                    vad_state=update.state.value,
+                    audio_bytes=len(frame.data),
+                    sample_rate=frame.sample_rate,
+                    chunk_duration_ms=chunk_duration_ms,
+                    speech_started=update.started,
+                    speech_ended=update.ended,
+                    speech_duration_ms=update.speech_duration_ms,
+                    speech_frame_ratio=update.speech_frame_ratio,
+                )
         if update.state_changed:
             await self.emit(
                 EventType.VAD_STATE_CHANGED,
@@ -274,11 +304,12 @@ class StreamModule:
             )
         if update.state == VADState.QUIET and not update.ended:
             self._pending_vad_frames.clear()
+            await self._maybe_reject_barge_in_candidate("noise_spike")
         if update.state == VADState.STARTING:
             self._pending_vad_frames.append(frame)
         if update.started:
             if self.state.active_response_id:
-                await self._cancel_response(self.state.active_response_id, "barge_in")
+                await self._confirm_barge_in_from_vad(update)
             self.state.turn_id = str(uuid4())
             self._turn_has_audio = False
             self._turn_audio_bytes = 0
@@ -321,6 +352,144 @@ class StreamModule:
             )
             await self._finalize_turn()
 
+    async def _handle_barge_in_candidate(self, message: dict[str, Any]) -> None:
+        candidate = BargeInCandidate(
+            barge_in_id=str(message.get("barge_in_id") or uuid4()),
+            call_id=self.call_id,
+            turn_id=str(message.get("turn_id") or ""),
+            response_id=str(message.get("response_id") or ""),
+            detected_at_monotonic_ms=float(
+                message.get("detected_at_monotonic_ms") or time.monotonic() * 1000
+            ),
+            last_played_sequence=int(message.get("last_played_sequence") or 0),
+            played_audio_ms=float(message.get("played_audio_ms") or 0.0),
+            source="browser",
+        )
+        with tracer.start_as_current_span("barge_in.candidate") as span:
+            set_span_attributes(
+                span,
+                call_id=self.call_id,
+                turn_id=candidate.turn_id,
+                response_id=candidate.response_id,
+                barge_in_id=candidate.barge_in_id,
+                source=candidate.source,
+                played_audio_ms=candidate.played_audio_ms,
+                last_played_sequence=candidate.last_played_sequence,
+            )
+            transition = self._barge_in.candidate(candidate)
+            set_span_attributes(
+                span,
+                barge_in_state=transition.state.value,
+                reason_code=transition.reason_code,
+                duplicate=transition.duplicate,
+            )
+        if transition.reason_code == "stale_response":
+            await self._emit_barge_rejected(transition, "stale_response")
+            return
+        if transition.duplicate:
+            return
+        self._barge_in.playback_progress(
+            turn_id=candidate.turn_id,
+            response_id=candidate.response_id,
+            last_played_sequence=candidate.last_played_sequence,
+            played_audio_ms=candidate.played_audio_ms,
+        )
+        BARGE_IN_CANDIDATES_TOTAL.labels(candidate.source).inc()
+        BARGE_IN_PLAYBACK_STOP_LATENCY.observe(0.001)
+        await self.emit(
+            EventType.USER_BARGE_IN_CANDIDATE,
+            "barge_in",
+            payload={
+                "barge_in_id": candidate.barge_in_id,
+                "source": candidate.source,
+                "response_id": candidate.response_id,
+                "last_played_sequence": candidate.last_played_sequence,
+                "played_audio_ms": candidate.played_audio_ms,
+            },
+        )
+        await self.emit(
+            EventType.PIPELINE_PLAYBACK_STOPPED,
+            "transport",
+            payload={
+                "barge_in_id": candidate.barge_in_id,
+                "response_id": candidate.response_id,
+                "reason_code": "speculative_candidate",
+            },
+        )
+        await self._send_pipeline_state()
+
+    async def _handle_playback_progress(self, message: dict[str, Any]) -> None:
+        response_id = str(message.get("response_id") or "")
+        cursor = self._barge_in.playback_progress(
+            turn_id=str(message.get("turn_id") or ""),
+            response_id=response_id,
+            last_played_sequence=int(message.get("last_played_sequence") or 0),
+            played_audio_ms=float(message.get("played_audio_ms") or 0.0),
+        )
+        if response_id in self._responses.cancelled:
+            AUDIO_PLAYED_AFTER_CANCEL_MS.inc(cursor.played_audio_ms)
+
+    async def _maybe_reject_barge_in_candidate(self, reason_code: str) -> None:
+        transition = self._barge_in.reject(reason_code) or self._barge_in.reject_expired()
+        if transition:
+            await self._emit_barge_rejected(transition, transition.reason_code)
+
+    async def _emit_barge_rejected(
+        self, transition: Any, reason_code: str
+    ) -> None:
+        BARGE_IN_REJECTED_TOTAL.labels(reason_code).inc()
+        await self.emit(
+            EventType.USER_BARGE_IN_REJECTED,
+            "barge_in",
+            payload={
+                "barge_in_id": transition.barge_in_id,
+                "response_id": transition.response_id,
+                "reason_code": reason_code,
+            },
+        )
+
+    async def _confirm_barge_in_from_vad(self, update: TurnUpdate) -> None:
+        response_id = self.state.active_response_id
+        if not response_id:
+            return
+        if update.speech_duration_ms < self.settings.barge_in_confirmation_ms:
+            return
+        if update.speech_frame_ratio < self.settings.barge_in_min_speech_ratio:
+            return
+        if not self._barge_in.current_candidate:
+            self._barge_in.backend_candidate(turn_id=self.state.turn_id, response_id=response_id)
+            BARGE_IN_CANDIDATES_TOTAL.labels("backend_vad").inc()
+        started = time.perf_counter()
+        transition = self._barge_in.confirm("sustained_speech")
+        if not transition:
+            return
+        with tracer.start_as_current_span("barge_in.confirmation") as span:
+            set_span_attributes(
+                span,
+                call_id=self.call_id,
+                turn_id=transition.turn_id,
+                response_id=response_id,
+                reason_code=transition.reason_code,
+                speech_duration_ms=update.speech_duration_ms,
+                speech_frame_ratio=update.speech_frame_ratio,
+            )
+        BARGE_IN_CONFIRMED_TOTAL.labels(transition.reason_code).inc()
+        BARGE_IN_CONFIRMATION_LATENCY.labels(transition.reason_code).observe(
+            max(0.0, (time.perf_counter() - started))
+        )
+        await self.emit(
+            EventType.USER_BARGE_IN_CONFIRMED,
+            "barge_in",
+            payload={
+                "barge_in_id": transition.barge_in_id,
+                "response_id": response_id,
+                "reason_code": transition.reason_code,
+                "speech_duration_ms": update.speech_duration_ms,
+                "speech_frame_ratio": update.speech_frame_ratio,
+            },
+        )
+        await self._cancel_response(response_id, "barge_in_confirmed")
+
     async def _append_turn_audio(self, frame: AudioFrame) -> None:
         self._turn_audio_bytes += len(frame.data)
         if self._turn_audio_bytes > self.settings.websocket_max_audio_bytes:
@@ -345,14 +514,42 @@ class StreamModule:
             transcript = await self._run_stt(turn_id)
             ignored_reason = self._noise_turn_reason(turn_id, transcript)
             if ignored_reason:
+                await self._resolve_barge_in_semantics(turn_id, transcript, forced_noise=True)
+                self._last_interruption = None
                 await self._ignore_noise_turn(turn_id, ignored_reason)
+                return
+            semantic = await self._resolve_barge_in_semantics(turn_id, transcript)
+            if (
+                semantic == BargeInSemantic.BACKCHANNEL
+                and self.settings.barge_in_backchannel_policy != "high"
+            ):
+                self._conversation.append(
+                    {
+                        "role": "user",
+                        "turn_id": turn_id,
+                        "content": transcript,
+                        "semantic": semantic.value,
+                        "handled_as": "backchannel_ignored",
+                    }
+                )
+                self._last_interruption = None
                 return
             self._record_turn_outcome(turn_id, "accepted")
             self.state.transcript = transcript
             await self.transport.send_json(
                 "transcript.final", call_id=self.call_id, turn_id=turn_id, text=transcript
             )
-            await self._run_llm_tts_transport(transcript)
+            self._conversation.append(
+                {
+                    "role": "user",
+                    "turn_id": turn_id,
+                    "content": transcript,
+                    "semantic": semantic.value if semantic else None,
+                }
+            )
+            await self._run_llm_tts_transport(transcript, semantic)
+            if semantic:
+                self._last_interruption = None
 
     async def _run_stt(self, turn_id: str) -> str:
         self.state.current_stage = "stt"
@@ -472,12 +669,15 @@ class StreamModule:
         stats = self._turn_stats_by_id.get(turn_id) or self._current_turn_stats()
         speech_duration_ms = stats.get("speech_duration_ms", 0.0)
         speech_frame_ratio = stats.get("speech_frame_ratio", 0.0)
+        cleaned_transcript = transcript.strip()
         if speech_duration_ms < self.settings.vad_min_turn_audio_ms:
             return "too_short"
-        if speech_frame_ratio < self.settings.vad_min_speech_frame_ratio:
-            return "low_speech_ratio"
-        if not transcript.strip():
+        if not cleaned_transcript:
             return "empty_transcript"
+        if speech_frame_ratio < self.settings.vad_min_speech_frame_ratio:
+            if speech_duration_ms >= self.settings.vad_min_transcribed_turn_audio_ms:
+                return None
+            return "low_speech_ratio"
         return None
 
     def _record_turn_outcome(self, turn_id: str, outcome: str) -> None:
@@ -508,9 +708,88 @@ class StreamModule:
             reason_code=reason_code,
         )
 
-    async def _run_llm_tts_transport(self, transcript: str) -> None:
+    async def _resolve_barge_in_semantics(
+        self,
+        turn_id: str,
+        transcript: str,
+        *,
+        forced_noise: bool = False,
+    ) -> BargeInSemantic | None:
+        if not self._last_interruption and not forced_noise:
+            return None
+        started = time.perf_counter()
+        self._barge_in.resolving()
+        semantic = (
+            BargeInSemantic.NOISE_OR_ECHO
+            if forced_noise
+            else classify_interruption(transcript)
+        )
+        BARGE_IN_CLASSIFICATION_LATENCY.labels(semantic.value).observe(
+            time.perf_counter() - started
+        )
+        with tracer.start_as_current_span("barge_in.semantic_resolution") as span:
+            set_span_attributes(
+                span,
+                call_id=self.call_id,
+                turn_id=turn_id,
+                semantic=semantic.value,
+                transcript_chars=len(transcript),
+                interrupted_response_id=self._last_interruption.get("response_id")
+                if self._last_interruption
+                else None,
+            )
+        await self.emit(
+            EventType.USER_BARGE_IN_CLASSIFIED,
+            "barge_in",
+            turn_id=turn_id,
+            payload={
+                "semantic": semantic.value,
+                "interrupted_response_id": self._last_interruption.get("response_id")
+                if self._last_interruption
+                else None,
+            },
+        )
+        self._barge_in.resolved(semantic)
+        return semantic
+
+    def _llm_context(self, semantic: BargeInSemantic | None) -> dict[str, Any]:
+        return {
+            "call_id": self.call_id,
+            "messages": self._conversation[-10:],
+            "barge_in": {
+                "semantic": semantic.value if semantic else None,
+                "interruption": self._last_interruption,
+                "instruction": self._semantic_instruction(semantic),
+            }
+            if semantic
+            else None,
+        }
+
+    def _semantic_instruction(self, semantic: BargeInSemantic | None) -> str | None:
+        if semantic == BargeInSemantic.CORRECTION:
+            return "The latest user turn corrects or replaces the prior intent."
+        if semantic == BargeInSemantic.CANCELLATION_REQUEST:
+            return (
+                "The latest user turn may request cancellation. Do not assume a durable "
+                "business action is cancelled unless a tool route explicitly does it."
+            )
+        if semantic == BargeInSemantic.ADDITIVE_CONTEXT:
+            return "The latest user turn adds context to the previous conversation."
+        if semantic == BargeInSemantic.CLARIFICATION_OR_REPEAT:
+            return "The user is asking for clarification or repetition."
+        if semantic == BargeInSemantic.UNKNOWN_INTERRUPTION:
+            return "Use the conversation and interruption metadata to infer the best response."
+        return None
+
+    async def _run_llm_tts_transport(
+        self, transcript: str, semantic: BargeInSemantic | None = None
+    ) -> None:
         response_id = self._responses.start_response(self.state.turn_id)
         self.state.active_response_id = response_id
+        self._barge_in.assistant_playing(turn_id=self.state.turn_id, response_id=response_id)
+        self._response_text_by_id[response_id] = ""
+        self._response_estimated_ms_by_id[response_id] = 0.0
+        self._response_audio_sequences[response_id] = 0
         token_queue: FlowControlledQueue[TextQueueItem] = FlowControlledQueue(
             call_id=self.call_id,
             stage="llm_to_tts",
@@ -541,7 +820,9 @@ class StreamModule:
             "llm_to_tts": token_queue,
             "tts_to_transport": audio_queue,
         }
-        llm_task = asyncio.create_task(self._produce_llm(transcript, token_queue, response_id))
+        llm_task = asyncio.create_task(
+            self._produce_llm(transcript, token_queue, response_id, semantic)
+        )
         tts_task = asyncio.create_task(self._consume_tts(token_queue, audio_queue, response_id))
         transport_task = asyncio.create_task(self._consume_transport(audio_queue, response_id))
         try:
@@ -564,6 +845,7 @@ class StreamModule:
         transcript: str,
         queue: FlowControlledQueue[TextQueueItem],
         response_id: str,
+        semantic: BargeInSemantic | None,
     ) -> None:
         self.state.current_stage = "llm"
         await self.emit(EventType.LLM_STARTED, "llm")
@@ -571,18 +853,22 @@ class StreamModule:
         first = True
         response_parts: list[str] = []
         sequence = 0
+        turn_id = self.state.turn_id
         try:
             with tracer.start_as_current_span("pipeline.llm") as span:
                 set_span_attributes(
                     span,
                     call_id=self.call_id,
-                    turn_id=self.state.turn_id,
+                    turn_id=turn_id,
+                    response_id=response_id,
                     stage="llm",
                     provider=self.llm.name,
                     model=self.llm.model,
                     transcript_chars=len(transcript),
+                    barge_in_semantic=semantic.value if semantic else None,
                 )
-                async for token in generate_tokens(self.llm, transcript, {"call_id": self.call_id}):
+                context = self._llm_context(semantic)
+                async for token in generate_tokens(self.llm, transcript, context):
                     if first:
                         first = False
                         first_token_latency = (time.perf_counter() - started) * 1000
@@ -591,11 +877,15 @@ class StreamModule:
                         ).observe(first_token_latency)
                         await self.emit(EventType.LLM_FIRST_TOKEN, "llm")
                     response_parts.append(token)
-                    if self._is_stale_response(self.state.turn_id, response_id):
+                    self._response_text_by_id[response_id] = "".join(response_parts)
+                    self._response_estimated_ms_by_id[response_id] = self._estimate_speech_ms(
+                        self._response_text_by_id[response_id]
+                    )
+                    if self._is_stale_response(turn_id, response_id):
                         await self._drop_stale_chunk(
                             "llm_to_tts",
                             "text",
-                            self._stale_reason(self.state.turn_id, response_id),
+                            self._stale_reason(turn_id, response_id),
                             response_id=response_id,
                         )
                         break
@@ -604,7 +894,7 @@ class StreamModule:
                     await queue.put(
                         TextChunk(
                             call_id=self.call_id,
-                            turn_id=self.state.turn_id,
+                            turn_id=turn_id,
                             response_id=response_id,
                             sequence=sequence,
                             text=token,
@@ -613,7 +903,14 @@ class StreamModule:
                     )
                     self._set_queue_depth("llm_to_tts", queue.depth_weight)
                     await self._send_pipeline_state()
-                    await self.transport.send_json("llm.token", text=token)
+                    await self.transport.send_json(
+                        "llm.token",
+                        call_id=self.call_id,
+                        turn_id=turn_id,
+                        response_id=response_id,
+                        sequence=sequence,
+                        text=token,
+                    )
                 set_span_attributes(
                     span,
                     response_chars=sum(len(part) for part in response_parts),
@@ -626,13 +923,25 @@ class StreamModule:
             await queue.put(
                 EndOfStream(
                     call_id=self.call_id,
-                    turn_id=self.state.turn_id,
+                    turn_id=turn_id,
                     response_id=response_id,
                 ),
                 bypass_cork=True,
             )
         response = "".join(response_parts)
+        self._response_text_by_id[response_id] = response
+        self._response_estimated_ms_by_id[response_id] = self._estimate_speech_ms(response)
         self.state.response = response
+        if response_id not in self._interrupted_response_ids:
+            self._conversation.append(
+                {
+                    "role": "assistant",
+                    "response_id": response_id,
+                    "turn_id": turn_id,
+                    "status": "completed",
+                    "content": response,
+                }
+            )
         latency = (time.perf_counter() - started) * 1000
         STAGE_LATENCY.labels("llm", self.llm.name).observe(latency)
         await self.emit(
@@ -679,6 +988,7 @@ class StreamModule:
         response_id: str,
     ) -> None:
         self.state.current_stage = "tts"
+        response_turn_id = self._responses.response_turns.get(response_id, self.state.turn_id)
         buffer = ""
         first_audio = True
         started = time.perf_counter()
@@ -718,7 +1028,7 @@ class StreamModule:
             await audio_queue.put(
                 EndOfStream(
                     call_id=self.call_id,
-                    turn_id=self.state.turn_id,
+                    turn_id=response_turn_id,
                     response_id=response_id,
                 ),
                 bypass_cork=True,
@@ -752,7 +1062,7 @@ class StreamModule:
             )
             return first_audio
         phrase_started = time.perf_counter()
-        sequence = 0
+        sequence = self._response_audio_sequences.get(response_id, 0)
         with tracer.start_as_current_span("pipeline.tts") as span:
             set_span_attributes(
                 span,
@@ -785,6 +1095,7 @@ class StreamModule:
                     )
                     continue
                 sequence += 1
+                self._response_audio_sequences[response_id] = sequence
                 await audio_queue.wait_if_corked()
                 await audio_queue.put(
                     AudioChunk(
@@ -869,7 +1180,14 @@ class StreamModule:
                     response_id=item.response_id,
                 )
                 continue
-            await self.transport.send_audio(item.data)
+            await self.transport.send_audio(
+                item.data,
+                call_id=item.call_id,
+                turn_id=item.turn_id,
+                response_id=item.response_id,
+                sequence=item.sequence,
+                sample_rate=item.sample_rate,
+            )
             bytes_sent += len(item.data)
             chunks_sent += 1
 
@@ -980,25 +1298,39 @@ class StreamModule:
         )
 
     async def _cancel_response(self, response_id: str, reason_code: str) -> None:
+        started = time.perf_counter()
+        self._barge_in.begin_cancelling(response_id)
         if not self._responses.cancel_response(response_id, reason_code):
             return
         self.state.active_response_id = self._responses.active_response_id
-        text_queue = self._live_queues.get("llm_to_tts")
-        audio_queue = self._live_queues.get("tts_to_transport")
-        flushed_text = (
-            await text_queue.flush(
-                lambda item: isinstance(item, TextChunk) and item.response_id == response_id
+        with tracer.start_as_current_span("barge_in.cancel_response") as span:
+            set_span_attributes(
+                span,
+                call_id=self.call_id,
+                response_id=response_id,
+                reason_code=reason_code,
             )
-            if text_queue
-            else []
-        )
-        flushed_audio = (
-            await audio_queue.flush(
-                lambda item: isinstance(item, AudioChunk) and item.response_id == response_id
+            text_queue = self._live_queues.get("llm_to_tts")
+            audio_queue = self._live_queues.get("tts_to_transport")
+            flushed_text = (
+                await text_queue.flush(
+                    lambda item: isinstance(item, TextChunk) and item.response_id == response_id
+                )
+                if text_queue
+                else []
             )
-            if audio_queue
-            else []
-        )
+            flushed_audio = (
+                await audio_queue.flush(
+                    lambda item: isinstance(item, AudioChunk) and item.response_id == response_id
+                )
+                if audio_queue
+                else []
+            )
+            set_span_attributes(
+                span,
+                flushed_text_items=len(flushed_text),
+                flushed_audio_items=len(flushed_audio),
+            )
         stale_audio_ms = sum(
             item.duration_ms for item in flushed_audio if isinstance(item, AudioChunk)
         )
@@ -1013,9 +1345,12 @@ class StreamModule:
             STALE_AUDIO_DROPPED_MS_TOTAL.labels(
                 "tts_to_transport", "response_cancelled"
             ).inc(stale_audio_ms)
+        self._mark_response_interrupted(response_id)
+        self._barge_in.cancelled(response_id)
+        BARGE_IN_BACKEND_CANCEL_LATENCY.observe(time.perf_counter() - started)
         await self.emit(
             EventType.PIPELINE_RESPONSE_CANCELLED,
-            "backpressure",
+            "barge_in",
             payload={
                 "response_id": response_id,
                 "reason_code": reason_code,
@@ -1023,6 +1358,57 @@ class StreamModule:
                 "flushed_audio_items": len(flushed_audio),
                 "stale_audio_ms": stale_audio_ms,
             },
+        )
+        await self._safe_send_json(
+            EventType.PIPELINE_RESPONSE_CANCELLED.value,
+            call_id=self.call_id,
+            turn_id=self._responses.response_turns.get(response_id, self.state.turn_id),
+            response_id=response_id,
+            reason_code=reason_code,
+        )
+        asyncio.create_task(self._cancel_provider_streams(response_id))
+
+    async def _cancel_provider_streams(self, response_id: str) -> None:
+        with tracer.start_as_current_span("provider.cancel") as span:
+            set_span_attributes(span, call_id=self.call_id, response_id=response_id)
+            with suppress(Exception):
+                await self.tts.cancel(response_id)
+            with suppress(Exception):
+                await self.llm.cancel(response_id)
+
+    def _mark_response_interrupted(self, response_id: str) -> None:
+        if response_id in self._interrupted_response_ids:
+            return
+        self._interrupted_response_ids.add(response_id)
+        generated_text = self._response_text_by_id.get(response_id, "")
+        estimated_ms = max(self._response_estimated_ms_by_id.get(response_id, 0.0), 1.0)
+        cursor = self._barge_in.playback_cursor
+        played_ms = cursor.played_audio_ms if cursor and cursor.response_id == response_id else 0.0
+        ratio = max(0.0, min(1.0, played_ms / estimated_ms))
+        spoken_chars = int(len(generated_text) * ratio)
+        spoken_text = generated_text[:spoken_chars]
+        INTERRUPTED_RESPONSE_SPOKEN_RATIO.observe(ratio)
+        interruption = {
+            "response_id": response_id,
+            "turn_id": self._responses.response_turns.get(response_id),
+            "generated_text": generated_text,
+            "spoken_text": spoken_text,
+            "played_audio_ms": played_ms,
+            "last_played_sequence": cursor.last_played_sequence if cursor else 0,
+            "spoken_ratio": ratio,
+        }
+        self._last_interruption = interruption
+        self._conversation.append(
+            {
+                "role": "assistant",
+                "response_id": response_id,
+                "turn_id": interruption["turn_id"],
+                "status": "interrupted",
+                "content": spoken_text,
+                "generated_text": generated_text,
+                "played_audio_ms": played_ms,
+                "last_played_sequence": interruption["last_played_sequence"],
+            }
         )
 
     def _expect_usage(self, turn_id: str, usage_type: str) -> None:
@@ -1047,7 +1433,7 @@ class StreamModule:
         }
 
     async def _send_pipeline_state(self) -> None:
-        await self.transport.send_json(
+        await self._safe_send_json(
             "pipeline.state",
             state={
                 "stage": self.state.current_stage,
@@ -1057,6 +1443,7 @@ class StreamModule:
                 "backpressure": self.state.backpressure_payload(),
                 "vad": self.state.vad,
                 "active_response_id": self.state.active_response_id,
+                "barge_in": self._barge_in.snapshot(),
             },
         )
 
@@ -1092,7 +1479,7 @@ class StreamModule:
             trace_id=current_trace_id(),
         )
         await self.producer.publish(event)
-        await self.transport.send_json(
+        await self._safe_send_json(
             "pipeline.event",
             event=event.model_dump(mode="json"),
             state={
@@ -1103,6 +1490,7 @@ class StreamModule:
                 "backpressure": self.state.backpressure_payload(),
                 "vad": self.state.vad,
                 "active_response_id": self.state.active_response_id,
+                "barge_in": self._barge_in.snapshot(),
             },
         )
         return event
@@ -1116,7 +1504,11 @@ class StreamModule:
             payload={"error": error},
         )
         await self.temporal.signal(self.call_id, "call_failed", {"error": error})
-        await self.transport.send_json("error", message=error)
+        await self._safe_send_json("error", message=error)
+
+    async def _safe_send_json(self, event_type: str, **payload: Any) -> None:
+        with suppress(Exception):
+            await self.transport.send_json(event_type, **payload)
 
     async def _end_call(self) -> None:
         if self._closed:
@@ -1124,25 +1516,25 @@ class StreamModule:
         self._closed = True
         if self._failed:
             return
+        await self.emit(
+            EventType.USAGE_FINALIZATION_BARRIER,
+            "billing",
+            turn_id="session",
+            payload=self._usage_manifest_payload(),
+        )
+        await self.emit(
+            EventType.CALL_ENDED,
+            "transport",
+            turn_id="session",
+            payload={
+                "final_response": self.state.response,
+                "duration_seconds": time.monotonic() - self._call_started_at,
+            },
+        )
         with suppress(Exception):
-            await self.emit(
-                EventType.USAGE_FINALIZATION_BARRIER,
-                "billing",
-                turn_id="session",
-                payload=self._usage_manifest_payload(),
-            )
-            await self.emit(
-                EventType.CALL_ENDED,
-                "transport",
-                turn_id="session",
-                payload={
-                    "final_response": self.state.response,
-                    "duration_seconds": time.monotonic() - self._call_started_at,
-                },
-            )
             await self.temporal.signal(
                 self.call_id,
                 "call_completed",
                 {"summary": self.state.response},
             )
-            await self.transport.send_json("call.ended", call_id=self.call_id)
+        await self._safe_send_json("call.ended", call_id=self.call_id)

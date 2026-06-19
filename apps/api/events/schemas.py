@@ -15,6 +15,10 @@ class EventType(StrEnum):
     VAD_NOISE_TURN_IGNORED = "vad.noise_turn_ignored"
     VAD_PROVIDER_FAILED = "vad.provider_failed"
     VAD_STATE_CHANGED = "vad.state_changed"
+    USER_BARGE_IN_CANDIDATE = "user.barge_in_candidate"
+    USER_BARGE_IN_CONFIRMED = "user.barge_in_confirmed"
+    USER_BARGE_IN_REJECTED = "user.barge_in_rejected"
+    USER_BARGE_IN_CLASSIFIED = "user.barge_in_classified"
     STT_STARTED = "stt.started"
     STT_FINAL_TRANSCRIPT = "stt.final_transcript"
     LLM_STARTED = "llm.started"
@@ -31,6 +35,7 @@ class EventType(StrEnum):
     PIPELINE_HARD_LIMIT_REACHED = "pipeline.hard_limit_reached"
     PIPELINE_RESPONSE_CANCELLED = "pipeline.response_cancelled"
     PIPELINE_STALE_CHUNK_DROPPED = "pipeline.stale_chunk_dropped"
+    PIPELINE_PLAYBACK_STOPPED = "pipeline.playback_stopped"
     PIPELINE_STAGE_TIMEOUT = "pipeline.stage_timeout"
     PROVIDER_FAILED = "provider.failed"
     PROVIDER_FALLBACK_SELECTED = "provider.fallback_selected"
@@ -101,6 +106,7 @@ class PipelineEvent(BaseModel):
 TOPIC_BY_EVENT_PREFIX = {
     "call.": "call-events",
     "vad.": "pipeline-events",
+    "user.": "pipeline-events",
     "stt.": "pipeline-events",
     "llm.": "pipeline-events",
     "tts.": "pipeline-events",

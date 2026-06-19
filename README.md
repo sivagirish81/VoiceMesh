@@ -65,7 +65,8 @@ Read [docs/architecture.md](docs/architecture.md) for the full model,
 [docs/runtime_boundaries.md](docs/runtime_boundaries.md) for turn fencing, cancellation,
 and barge-in, and [docs/vad-and-endpointing.md](docs/vad-and-endpointing.md) for noisy
 environment tuning. See [docs/backpressure.md](docs/backpressure.md) for the hot-path
-flow-control model.
+flow-control model and [docs/barge-in.md](docs/barge-in.md) for candidate-confirmation
+interruption handling.
 
 ## Current POC
 
@@ -93,9 +94,10 @@ The working implementation intentionally has several simpler boundaries:
   tokens, and a configurable per-minute platform fee.
 - A Temporal workflow still starts per call for the recovery lab, but routine
   cork/uncork is no longer signaled to it.
-- Response-fenced text/audio queues and cancellation primitives are implemented.
-  Full-duplex browser playback interruption and provider-native cancellation remain
-  production hardening work.
+- Barge-in uses a browser-side speculative candidate, backend VAD confirmation,
+  response fencing, browser stale-audio rejection, and post-STT semantic resolution.
+  Exact browser playback resume after a rejected candidate and provider-native request
+  abort remain production hardening work.
 
 These are documented current behaviors, not the recommended production architecture.
 The next production-oriented step is tighter browser/provider cancellation and moving
@@ -318,7 +320,8 @@ to activities, though production Temporal propagation should use interceptors.
 Jaeger stores local traces in a Badger-backed `jaeger-data` Compose volume instead of
 pure memory, and FastAPI `/metrics` is excluded from tracing so Prometheus scrapes do
 not bury the useful call traces. A good call trace under `voicemesh-api` should include
-`voice.call`, `pipeline.vad`, `pipeline.stt`, `pipeline.llm`, `pipeline.tts`,
+`voice.call`, turn-level/state-transition `pipeline.vad`, `pipeline.stt`,
+`pipeline.llm`, `pipeline.tts`,
 OpenAI provider spans such as `provider.openai.llm.responses_stream` and
 `provider.openai.tts.speech_stream`, `kafka.publish`, downstream `kafka.consume`,
 `postgres.project_event`, and relevant `temporal.activity.*` spans.
@@ -356,6 +359,7 @@ See [docs/otel_tracing.md](docs/otel_tracing.md).
 - [Architecture](docs/architecture.md)
 - [Runtime boundaries](docs/runtime_boundaries.md)
 - [Backpressure and corking](docs/backpressure.md)
+- [Barge-in handling](docs/barge-in.md)
 - [VAD and endpointing](docs/vad-and-endpointing.md)
 - [Event contracts](docs/events.md)
 - [Kafka versus Temporal](docs/kafka_vs_temporal.md)
@@ -378,8 +382,9 @@ See [docs/otel_tracing.md](docs/otel_tracing.md).
   still require calibrated transport audio processing, provider-native endpointing, or a
   future neural VAD such as Silero.
 - Browser capture uses `ScriptProcessorNode`; an AudioWorklet is the migration path.
-- Browser-level stop-playback on barge-in is still limited; server-side response
-  fencing, stale-chunk drops, and queue flushing are implemented.
+- Browser-level barge-in is POC-grade: it stops playback speculatively and relies on
+  backend VAD/STT confirmation before permanent cancellation. Rejected candidate resume
+  is best-effort rather than sample-perfect.
 - Only OpenAI provider adapters are implemented.
 - Kafka publishing is awaited by the session worker; a production runtime should use a
   bounded asynchronous publication buffer or local durable handoff.
@@ -396,7 +401,8 @@ See [docs/otel_tracing.md](docs/otel_tracing.md).
 
 ## Future Work
 
-- Full-duplex browser barge-in and cooperative provider cancellation
+- Transport-native barge-in signals, sample-accurate playback resume, and cooperative
+  provider cancellation
 - Media gateway plus WebRTC/SIP/telephony transport adapters
 - Bounded asynchronous Kafka publication from the session runtime
 - Versioned tenant-aware event envelopes and schema registry compatibility checks

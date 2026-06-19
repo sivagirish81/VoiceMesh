@@ -68,7 +68,14 @@ class Settings(BaseSettings):
     vad_speech_pad_ms: int = Field(default=150, ge=0)
     vad_min_turn_audio_ms: int = Field(default=300, ge=0)
     vad_min_speech_frame_ratio: float = Field(default=0.60, ge=0, le=1)
+    vad_min_transcribed_turn_audio_ms: int = Field(default=700, ge=0)
     vad_enable_browser_noise_suppression: bool = True
+    barge_in_confirmation_ms: int = Field(default=200, ge=0)
+    barge_in_min_speech_frames: int = Field(default=3, ge=1)
+    barge_in_min_speech_ratio: float = Field(default=0.60, ge=0, le=1)
+    barge_in_candidate_retention_ms: int = Field(default=1200, ge=100)
+    barge_in_backchannel_policy: str = "medium"
+    barge_in_interruption_sensitivity: str = "medium"
     energy_vad_adaptive_noise_floor: bool = True
     energy_vad_noise_multiplier: float = Field(default=3.0, gt=1)
     energy_vad_noise_update_alpha: float = Field(default=0.05, gt=0, le=1)
@@ -118,6 +125,10 @@ class Settings(BaseSettings):
             raise ValueError("VAD_FRAME_MS must be 10, 20, or 30")
         if self.vad_sample_rate not in {8000, 16000, 32000, 48000}:
             raise ValueError("VAD_SAMPLE_RATE must be one of 8000, 16000, 32000, or 48000")
+        if self.barge_in_backchannel_policy not in {"low", "medium", "high"}:
+            raise ValueError("BARGE_IN_BACKCHANNEL_POLICY must be low, medium, or high")
+        if self.barge_in_interruption_sensitivity not in {"low", "medium", "high"}:
+            raise ValueError("BARGE_IN_INTERRUPTION_SENSITIVITY must be low, medium, or high")
         return self
 
     def validate_provider_credentials(self) -> None:

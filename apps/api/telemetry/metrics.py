@@ -105,6 +105,52 @@ STT_TURNS_COMMITTED_TOTAL = Counter(
     "STT turns committed after endpointing",
     ["provider"],
 )
+BARGE_IN_CANDIDATES_TOTAL = Counter(
+    "voicemesh_barge_in_candidates_total",
+    "Speculative barge-in candidates observed",
+    ["source"],
+)
+BARGE_IN_CONFIRMED_TOTAL = Counter(
+    "voicemesh_barge_in_confirmed_total",
+    "Barge-in candidates confirmed by backend evidence",
+    ["reason_code"],
+)
+BARGE_IN_REJECTED_TOTAL = Counter(
+    "voicemesh_barge_in_rejected_total",
+    "Barge-in candidates rejected by backend evidence",
+    ["reason_code"],
+)
+BARGE_IN_PLAYBACK_STOP_LATENCY = Histogram(
+    "voicemesh_barge_in_playback_stop_latency_seconds",
+    "Browser playback stop latency after a speculative candidate",
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.5, 1, 2),
+)
+BARGE_IN_BACKEND_CANCEL_LATENCY = Histogram(
+    "voicemesh_barge_in_backend_cancel_latency_seconds",
+    "Backend confirmed-candidate to response-fence latency",
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.5, 1, 2),
+)
+BARGE_IN_CONFIRMATION_LATENCY = Histogram(
+    "voicemesh_barge_in_confirmation_latency_seconds",
+    "Candidate to backend confirmation latency",
+    ["reason_code"],
+    buckets=(0.025, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 2, 5),
+)
+BARGE_IN_CLASSIFICATION_LATENCY = Histogram(
+    "voicemesh_barge_in_classification_latency_seconds",
+    "Post-STT barge-in semantic classification latency",
+    ["semantic"],
+    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5),
+)
+AUDIO_PLAYED_AFTER_CANCEL_MS = Counter(
+    "voicemesh_audio_played_after_cancel_ms",
+    "Best-effort browser-reported audio played after backend cancellation",
+)
+INTERRUPTED_RESPONSE_SPOKEN_RATIO = Histogram(
+    "voicemesh_interrupted_response_spoken_ratio",
+    "Estimated ratio of generated assistant response heard before interruption",
+    buckets=(0, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 1),
+)
 
 CALL_EVENTS_TOTAL = Counter(
     "voicemesh_call_events_total",

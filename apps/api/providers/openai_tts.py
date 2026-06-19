@@ -87,3 +87,14 @@ class OpenAITTSProvider(TTSProvider):
         usage = self._usage
         self._usage = SpeechUsage("", 0, 0.0)
         return usage
+
+    async def cancel(self, response_id: str) -> None:
+        with tracer.start_as_current_span("provider.openai.tts.cancel") as span:
+            set_span_attributes(
+                span,
+                provider="openai",
+                provider_stage="tts",
+                model=self.model,
+                response_id=response_id,
+                cancellation_mode="local_fence",
+            )

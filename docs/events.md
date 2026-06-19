@@ -41,7 +41,8 @@ Recommended production events include:
 - `llm.response_started`, `llm.first_token`, `llm.response_completed`
 - `llm.tool_call_requested`
 - `tts.first_audio_byte`, `tts.completed`, `tts.cancelled`
-- `user.barged_in`
+- `user.barge_in_candidate`, `user.barge_in_confirmed`,
+  `user.barge_in_rejected`, `user.barge_in_classified`
 - `provider.error`, `provider.timeout`
 - `tool.action.requested`, `tool.action.accepted`, `tool.action.cancel_requested`,
   `tool.action.cancelled`, `tool.action.completed`, `tool.action.failed`

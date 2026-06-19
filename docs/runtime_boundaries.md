@@ -88,19 +88,23 @@ pretending to provide global ordering.
 
 ## Barge-In
 
-When user speech begins while the agent is speaking:
+When possible user speech begins while the agent is speaking:
 
-1. VAD marks a new user interruption.
-2. The transport stops playback for the active `response_id`.
-3. The TTS request is cancelled when supported.
-4. The LLM request is cancelled, or its remaining output is ignored.
-5. Text, phrase, and audio queues for the old response are flushed or discarded.
-6. Stale provider callbacks are rejected by the response fence.
-7. The next `turn_id` becomes active and incoming speech continues to STT.
+1. The transport creates `BARGE_IN_CANDIDATE` and stops or ducks playback immediately.
+2. The session worker validates the candidate using backend VAD/STT evidence.
+3. If rejected, the response is not permanently cancelled.
+4. If confirmed, the active `response_id` is fenced and cancellation becomes idempotent.
+5. Text, phrase, and audio queues for that response are flushed or discarded.
+6. The TTS/LLM providers receive best-effort cancellation, but late output is rejected
+   locally by the response fence.
+7. STT finalizes the new user turn and semantic resolution decides whether the user was
+   correcting, cancelling, adding context, backchanneling, or asking for clarification.
 
 The system should measure cancellation-to-silence latency and stale chunks dropped.
 Completing obsolete audio is not a correctness goal. Durable finalized events should
 survive once committed; live buffers may be thrown away when freshness requires it.
+Browser playback resume after a rejected candidate is currently best-effort, not
+sample-perfect.
 
 ## Backpressure
 

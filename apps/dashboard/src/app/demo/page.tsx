@@ -24,6 +24,17 @@ type PipelineView = {
     total_duration_ms?: number;
     speech_frame_ratio?: number;
   };
+  active_response_id?: string | null;
+  barge_in?: {
+    state?: string;
+    active_response_id?: string | null;
+    candidate_id?: string | null;
+    last_semantic?: string | null;
+    playback?: {
+      last_played_sequence?: number;
+      played_audio_ms?: number;
+    } | null;
+  };
 };
 
 type MicDebug = {
@@ -32,6 +43,14 @@ type MicDebug = {
   autoGainControl?: boolean;
   sampleRate?: number;
   channelCount?: number;
+};
+
+type PlaybackCursor = {
+  turnId: string;
+  responseId: string;
+  lastPlayedSequence: number;
+  playedAudioMs: number;
+  startedAt: number;
 };
 
 function floatToInt16(input: Float32Array): ArrayBuffer {
@@ -57,11 +76,15 @@ export default function DemoPage() {
     stage: "transport", corked: false, queue_depths: {},
   });
   const websocket = useRef<WebSocket | null>(null);
+  const callIdRef = useRef("");
   const stream = useRef<MediaStream | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
   const processor = useRef<ScriptProcessorNode | null>(null);
   const playbackAt = useRef(0);
   const playbackSources = useRef<Set<AudioBufferSourceNode>>(new Set());
+  const activePlayback = useRef<PlaybackCursor | null>(null);
+  const cancelledResponses = useRef<Set<string>>(new Set());
+  const lastCandidateByResponse = useRef<Map<string, number>>(new Map());
 
   const stopPlayback = useCallback(() => {
     playbackSources.current.forEach((source) => {
@@ -76,6 +99,26 @@ export default function DemoPage() {
     playbackAt.current = 0;
   }, []);
 
+  const sendPlaybackProgress = useCallback(() => {
+    const socket = websocket.current;
+    const cursor = activePlayback.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN || !cursor) return;
+    const context = audioContext.current;
+    const elapsedMs = context
+      ? Math.max(0, (context.currentTime - cursor.startedAt) * 1000)
+      : cursor.playedAudioMs;
+    const playedAudioMs = Math.max(cursor.playedAudioMs, elapsedMs);
+    cursor.playedAudioMs = playedAudioMs;
+    socket.send(JSON.stringify({
+      type: "playback.progress",
+      call_id: callIdRef.current,
+      turn_id: cursor.turnId,
+      response_id: cursor.responseId,
+      last_played_sequence: cursor.lastPlayedSequence,
+      played_audio_ms: playedAudioMs,
+    }));
+  }, []);
+
   const stopCapture = useCallback(() => {
     if (processor.current) {
       processor.current.onaudioprocess = null;
@@ -86,7 +129,14 @@ export default function DemoPage() {
     stream.current = null;
   }, []);
 
-  const playPcm = useCallback((base64: string, sampleRate: number) => {
+  const playPcm = useCallback((
+    base64: string,
+    sampleRate: number,
+    turnId: string,
+    responseId: string,
+    sequence: number,
+  ) => {
+    if (cancelledResponses.current.has(responseId)) return;
     const context = audioContext.current ?? new AudioContext();
     audioContext.current = context;
     void context.resume();
@@ -101,14 +151,61 @@ export default function DemoPage() {
     source.buffer = buffer;
     source.connect(context.destination);
     const startAt = Math.max(context.currentTime + 0.03, playbackAt.current);
+    const cursor = activePlayback.current;
+    if (!cursor || cursor.responseId !== responseId) {
+      activePlayback.current = {
+        turnId,
+        responseId,
+        lastPlayedSequence: 0,
+        playedAudioMs: 0,
+        startedAt: startAt,
+      };
+    }
     source.start(startAt);
     playbackSources.current.add(source);
     source.onended = () => {
       playbackSources.current.delete(source);
       source.disconnect();
+      const active = activePlayback.current;
+      if (active?.responseId === responseId) {
+        active.lastPlayedSequence = Math.max(active.lastPlayedSequence, sequence);
+        active.playedAudioMs += buffer.duration * 1000;
+        sendPlaybackProgress();
+      }
     };
     playbackAt.current = startAt + buffer.duration;
-  }, []);
+  }, [sendPlaybackProgress]);
+
+  const maybeSendBargeInCandidate = useCallback((samples: Float32Array) => {
+    const socket = websocket.current;
+    const cursor = activePlayback.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN || !cursor) return;
+    if (playbackSources.current.size === 0) return;
+    let sum = 0;
+    for (let index = 0; index < samples.length; index += 1) sum += samples[index] * samples[index];
+    const rms = Math.sqrt(sum / Math.max(samples.length, 1));
+    if (rms < 0.025) return;
+    const now = performance.now();
+    const lastSent = lastCandidateByResponse.current.get(cursor.responseId) ?? 0;
+    if (now - lastSent < 1000) return;
+    lastCandidateByResponse.current.set(cursor.responseId, now);
+    stopPlayback();
+    const context = audioContext.current;
+    const playedAudioMs = context
+      ? Math.max(cursor.playedAudioMs, (context.currentTime - cursor.startedAt) * 1000)
+      : cursor.playedAudioMs;
+    cursor.playedAudioMs = Math.max(0, playedAudioMs);
+    socket.send(JSON.stringify({
+      type: "client.barge_in_candidate",
+      barge_in_id: crypto.randomUUID(),
+      call_id: callIdRef.current,
+      turn_id: cursor.turnId,
+      response_id: cursor.responseId,
+      detected_at_monotonic_ms: now,
+      last_played_sequence: cursor.lastPlayedSequence,
+      played_audio_ms: cursor.playedAudioMs,
+    }));
+  }, [stopPlayback]);
 
   async function startCall() {
     stopPlayback();
@@ -117,6 +214,7 @@ export default function DemoPage() {
     websocket.current = null;
     const id = crypto.randomUUID();
     setCallId(id);
+    callIdRef.current = id;
     setEvents([]);
     setPartialTranscript("");
     setTranscript("");
@@ -124,6 +222,9 @@ export default function DemoPage() {
     setIgnoredNoiseTurns(0);
     setMicDebug({});
     setPipeline({stage: "transport", corked: false, queue_depths: {}});
+    cancelledResponses.current.clear();
+    activePlayback.current = null;
+    lastCandidateByResponse.current.clear();
     const socket = new WebSocket(`${WS_URL}/ws/calls/${id}`);
     websocket.current = socket;
     socket.onopen = async () => {
@@ -159,7 +260,9 @@ export default function DemoPage() {
       socket.send(JSON.stringify({type: "audio.config", sample_rate: context.sampleRate, channels: 1}));
       node.onaudioprocess = (event) => {
         if (socket.readyState === WebSocket.OPEN) {
-          socket.send(floatToInt16(event.inputBuffer.getChannelData(0)));
+          const samples = event.inputBuffer.getChannelData(0);
+          maybeSendBargeInCandidate(samples);
+          socket.send(floatToInt16(samples));
         }
       };
       source.connect(node);
@@ -176,8 +279,25 @@ export default function DemoPage() {
         setTranscript(data.text);
         setPartialTranscript("");
       }
-      if (data.type === "llm.token") setResponse((current) => current + data.text);
-      if (data.type === "audio.chunk") playPcm(data.audio, data.sample_rate);
+      if (data.type === "llm.token") {
+        if (!data.response_id || !cancelledResponses.current.has(data.response_id)) {
+          setResponse((current) => current + data.text);
+        }
+      }
+      if (data.type === "audio.chunk") {
+        playPcm(
+          data.audio,
+          data.sample_rate,
+          data.turn_id,
+          data.response_id,
+          data.sequence,
+        );
+      }
+      if (data.type === "pipeline.response_cancelled") {
+        if (data.response_id) cancelledResponses.current.add(data.response_id);
+        stopPlayback();
+        activePlayback.current = null;
+      }
       if (data.type === "pipeline.event") {
         setEvents((current) => [...current.slice(-199), data.event]);
         setPipeline(data.state);
@@ -214,11 +334,15 @@ export default function DemoPage() {
     }
     stopCapture();
     stopPlayback();
+    cancelledResponses.current.clear();
+    activePlayback.current = null;
+    lastCandidateByResponse.current.clear();
     void audioContext.current?.close();
     audioContext.current = null;
     setConnected(false);
     setRecording(false);
     setCallId("");
+    callIdRef.current = "";
     setPartialTranscript("");
     setPipeline({stage: "transport", corked: false, queue_depths: {}});
   }
@@ -248,7 +372,7 @@ export default function DemoPage() {
         <div className="card"><h3>Microphone</h3><div className={`status ${recording ? "" : "idle"}`}>{recording ? "streaming PCM" : "stopped"}</div></div>
         <div className="card"><h3>Backpressure</h3><div className={`status ${pipeline.corked ? "corked" : ""}`}>{pipeline.corked ? "corked" : "uncorked"}</div></div>
       </div>
-      <div className="grid two">
+      <div className="grid three">
         <div className="card">
           <h3>Browser mic controls</h3>
           <div className="mono muted">
@@ -265,6 +389,16 @@ export default function DemoPage() {
             decision: {pipeline.vad?.decision ?? "unknown"} / ignored noise turns: {ignoredNoiseTurns}<br />
             energy: {pipeline.vad?.energy?.toFixed(4) ?? "n/a"} / noise_floor: {pipeline.vad?.noise_floor?.toFixed(4) ?? "n/a"}<br />
             speech_ms: {pipeline.vad?.speech_duration_ms?.toFixed(0) ?? "0"} / ratio: {pipeline.vad?.speech_frame_ratio?.toFixed(2) ?? "0.00"}
+          </div>
+        </div>
+        <div className="card">
+          <h3>Barge-in</h3>
+          <div className="mono muted">
+            state: {pipeline.barge_in?.state ?? "IDLE"}<br />
+            response: {pipeline.barge_in?.active_response_id ?? pipeline.active_response_id ?? "none"}<br />
+            candidate: {pipeline.barge_in?.candidate_id ?? "none"}<br />
+            semantic: {pipeline.barge_in?.last_semantic ?? "none"}<br />
+            played: {Math.round(pipeline.barge_in?.playback?.played_audio_ms ?? 0)} ms
           </div>
         </div>
       </div>
