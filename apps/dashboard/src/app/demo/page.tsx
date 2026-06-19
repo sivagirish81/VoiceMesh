@@ -54,6 +54,9 @@ type PlaybackCursor = {
 };
 
 const BARGE_IN_ECHO_SUPPRESSION_MS = 350;
+const BARGE_IN_BROWSER_RMS_THRESHOLD = 0.025;
+const BARGE_IN_BROWSER_STRONG_RMS_THRESHOLD = 0.055;
+const BARGE_IN_BROWSER_CONFIRMATION_MS = 90;
 
 function floatToInt16(input: Float32Array): ArrayBuffer {
   const output = new Int16Array(input.length);
@@ -85,11 +88,30 @@ export default function DemoPage() {
   const processorSink = useRef<GainNode | null>(null);
   const playbackAt = useRef(0);
   const playbackSources = useRef<Set<AudioBufferSourceNode>>(new Set());
+  const playbackGain = useRef<GainNode | null>(null);
   const activePlayback = useRef<PlaybackCursor | null>(null);
   const cancelledResponses = useRef<Set<string>>(new Set());
   const lastCandidateByResponse = useRef<Map<string, number>>(new Map());
+  const candidateSpeechStart = useRef<{responseId: string; startedAt: number} | null>(null);
+  const speculativelyDuckedResponse = useRef<string | null>(null);
+
+  const setPlaybackVolume = useCallback((volume: number) => {
+    const gain = playbackGain.current;
+    const context = audioContext.current;
+    if (!gain || !context) return;
+    gain.gain.cancelScheduledValues(context.currentTime);
+    gain.gain.setTargetAtTime(volume, context.currentTime, 0.03);
+  }, []);
+
+  const restoreSpeculativePlayback = useCallback((responseId?: string) => {
+    if (responseId && speculativelyDuckedResponse.current !== responseId) return;
+    speculativelyDuckedResponse.current = null;
+    candidateSpeechStart.current = null;
+    setPlaybackVolume(1);
+  }, [setPlaybackVolume]);
 
   const stopPlayback = useCallback(() => {
+    restoreSpeculativePlayback();
     playbackSources.current.forEach((source) => {
       try {
         source.stop();
@@ -100,7 +122,7 @@ export default function DemoPage() {
     });
     playbackSources.current.clear();
     playbackAt.current = 0;
-  }, []);
+  }, [restoreSpeculativePlayback]);
 
   const sendPlaybackProgress = useCallback(() => {
     const socket = websocket.current;
@@ -172,10 +194,18 @@ export default function DemoPage() {
     for (let index = 0; index < samples.length; index += 1) channel[index] = samples[index] / 32768;
     const source = context.createBufferSource();
     source.buffer = buffer;
-    source.connect(context.destination);
+    if (!playbackGain.current || playbackGain.current.context !== context) {
+      playbackGain.current?.disconnect();
+      const gain = context.createGain();
+      gain.gain.value = speculativelyDuckedResponse.current === responseId ? 0.18 : 1;
+      gain.connect(context.destination);
+      playbackGain.current = gain;
+    }
+    source.connect(playbackGain.current);
     const startAt = Math.max(context.currentTime + 0.03, playbackAt.current);
     const cursor = activePlayback.current;
     if (!cursor || cursor.responseId !== responseId) {
+      restoreSpeculativePlayback();
       activePlayback.current = {
         turnId,
         responseId,
@@ -198,7 +228,7 @@ export default function DemoPage() {
       }
     };
     playbackAt.current = startAt + buffer.duration;
-  }, [sendPlaybackDone, sendPlaybackProgress]);
+  }, [restoreSpeculativePlayback, sendPlaybackDone, sendPlaybackProgress]);
 
   const maybeSendBargeInCandidate = useCallback((samples: Float32Array) => {
     const socket = websocket.current;
@@ -213,16 +243,31 @@ export default function DemoPage() {
     let sum = 0;
     for (let index = 0; index < samples.length; index += 1) sum += samples[index] * samples[index];
     const rms = Math.sqrt(sum / Math.max(samples.length, 1));
-    if (rms < 0.025) return;
     const now = performance.now();
+    if (rms < BARGE_IN_BROWSER_RMS_THRESHOLD) {
+      if (candidateSpeechStart.current?.responseId === cursor.responseId) {
+        candidateSpeechStart.current = null;
+      }
+      return;
+    }
+    if (candidateSpeechStart.current?.responseId !== cursor.responseId) {
+      candidateSpeechStart.current = {responseId: cursor.responseId, startedAt: now};
+      return;
+    }
+    if (now - candidateSpeechStart.current.startedAt < BARGE_IN_BROWSER_CONFIRMATION_MS) return;
     const lastSent = lastCandidateByResponse.current.get(cursor.responseId) ?? 0;
     if (now - lastSent < 1000) return;
     lastCandidateByResponse.current.set(cursor.responseId, now);
-    stopPlayback();
     const playedAudioMs = context
       ? Math.max(cursor.playedAudioMs, (context.currentTime - cursor.startedAt) * 1000)
       : cursor.playedAudioMs;
     cursor.playedAudioMs = Math.max(0, playedAudioMs);
+    if (rms >= BARGE_IN_BROWSER_STRONG_RMS_THRESHOLD) {
+      stopPlayback();
+    } else {
+      speculativelyDuckedResponse.current = cursor.responseId;
+      setPlaybackVolume(0.18);
+    }
     socket.send(JSON.stringify({
       type: "client.barge_in_candidate",
       barge_in_id: crypto.randomUUID(),
@@ -233,7 +278,7 @@ export default function DemoPage() {
       last_played_sequence: cursor.lastPlayedSequence,
       played_audio_ms: cursor.playedAudioMs,
     }));
-  }, [stopPlayback]);
+  }, [setPlaybackVolume, stopPlayback]);
 
   async function startCall() {
     stopPlayback();
@@ -333,6 +378,9 @@ export default function DemoPage() {
       if (data.type === "pipeline.event") {
         setEvents((current) => [...current.slice(-199), data.event]);
         setPipeline(data.state);
+        if (data.event?.event_type === "user.barge_in_rejected") {
+          restoreSpeculativePlayback(data.event.payload?.response_id);
+        }
       }
       if (data.type === "vad.noise_turn_ignored") {
         setIgnoredNoiseTurns((current) => current + 1);

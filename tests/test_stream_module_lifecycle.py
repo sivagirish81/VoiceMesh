@@ -18,6 +18,14 @@ class FailingDebugTransport:
         raise RuntimeError("websocket is already closed")
 
 
+class RecordingTransport:
+    def __init__(self) -> None:
+        self.messages: list[tuple[str, dict[str, Any]]] = []
+
+    async def send_json(self, event_type: str, **payload: Any) -> None:
+        self.messages.append((event_type, payload))
+
+
 class RecordingProducer:
     def __init__(self) -> None:
         self.events = []
@@ -58,6 +66,7 @@ def make_module(settings: Settings | None = None) -> StreamModule:
     module._usage_expectations = {}
     module._closed = False
     module._failed = False
+    module._turn_lock = asyncio.Lock()
     module._call_started_at = time.monotonic()
     module._responses = ResponseController()
     module._live_queues = {}
@@ -96,6 +105,22 @@ def test_transcribed_short_greeting_is_not_rejected_only_for_low_speech_ratio() 
     assert module._noise_turn_reason("turn-1", "Hello.") is None
 
 
+def test_short_hi_is_not_rejected_when_stt_heard_a_greeting() -> None:
+    module = make_module(
+        Settings(
+            vad_min_turn_audio_ms=300,
+            vad_min_speech_frame_ratio=0.60,
+            vad_min_transcribed_turn_audio_ms=700,
+        )
+    )
+    module._turn_stats_by_id["turn-1"] = {
+        "speech_duration_ms": 597.0,
+        "speech_frame_ratio": 0.45,
+    }
+
+    assert module._noise_turn_reason("turn-1", "Hi") is None
+
+
 def test_weak_short_transcript_is_still_rejected() -> None:
     module = make_module(
         Settings(
@@ -110,6 +135,36 @@ def test_weak_short_transcript_is_still_rejected() -> None:
     }
 
     assert module._noise_turn_reason("turn-1", "Hello.") == "low_speech_ratio"
+
+
+@pytest.mark.asyncio
+async def test_standalone_backchannel_does_not_call_llm_when_policy_is_not_high() -> None:
+    module = make_module(Settings(barge_in_backchannel_policy="medium"))
+
+    async def run_stt(_turn_id: str) -> str:
+        return "Yeah."
+
+    async def run_llm_tts_transport(_transcript: str, _semantic: Any) -> None:
+        raise AssertionError("backchannels should not start LLM/TTS")
+
+    module._run_stt = run_stt
+    module._run_llm_tts_transport = run_llm_tts_transport
+    module._turn_stats_by_id["turn-1"] = {
+        "speech_duration_ms": 900.0,
+        "speech_frame_ratio": 0.80,
+    }
+
+    await module._process_turn("turn-1")
+
+    assert module._conversation == [
+        {
+            "role": "user",
+            "turn_id": "turn-1",
+            "content": "Yeah.",
+            "semantic": "BACKCHANNEL",
+            "handled_as": "backchannel_ignored",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -214,6 +269,64 @@ async def test_backend_barge_in_confirmation_is_suppressed_during_echo_grace() -
 
     assert response_id not in module._interrupted_response_ids
     assert [event.event_type for event in module.producer.events] == []
+
+
+@pytest.mark.asyncio
+async def test_sustained_backend_speech_confirms_barge_in_after_initial_frame() -> None:
+    module = make_module(
+        Settings(
+            barge_in_backend_echo_grace_ms=600,
+            barge_in_backend_confirmation_ms=350,
+            barge_in_backend_min_speech_ratio=0.75,
+        )
+    )
+    response_id = module._responses.start_response("turn-1")
+    module.state.turn_id = "turn-2"
+    module.state.active_response_id = response_id
+    module._barge_in.assistant_playing(turn_id="turn-1", response_id=response_id)
+    module._response_last_audio_sent_at[response_id] = time.monotonic() - 1.0
+
+    await module._confirm_barge_in_from_vad(
+        TurnUpdate(
+            previous_state=VADState.SPEAKING,
+            state=VADState.SPEAKING,
+            speech_duration_ms=720,
+            speech_frame_ratio=0.90,
+        )
+    )
+
+    event_types = [event.event_type for event in module.producer.events]
+    assert EventType.USER_BARGE_IN_CONFIRMED in event_types
+    assert EventType.PIPELINE_RESPONSE_CANCELLED in event_types
+    assert response_id in module._interrupted_response_ids
+
+
+@pytest.mark.asyncio
+async def test_recent_audible_response_candidate_is_not_rejected_as_stale() -> None:
+    module = make_module(Settings(barge_in_recent_response_grace_ms=6000))
+    module.transport = RecordingTransport()
+    response_id = module._responses.start_response("turn-1")
+    module._responses.finish_response(response_id)
+    module.state.active_response_id = None
+    module._barge_in.assistant_finished(response_id)
+    module._response_last_audio_sent_at[response_id] = time.monotonic()
+    module._response_estimated_ms_by_id[response_id] = 3500
+
+    await module._handle_barge_in_candidate(
+        {
+            "barge_in_id": "bi-1",
+            "turn_id": "turn-1",
+            "response_id": response_id,
+            "last_played_sequence": 3,
+            "played_audio_ms": 900,
+        }
+    )
+
+    assert module.state.active_response_id == response_id
+    assert module._barge_in.active_response_id == response_id
+    event_types = [event.event_type for event in module.producer.events]
+    assert EventType.USER_BARGE_IN_CANDIDATE in event_types
+    assert EventType.USER_BARGE_IN_REJECTED not in event_types
 
 
 @pytest.mark.asyncio
