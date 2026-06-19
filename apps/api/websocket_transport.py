@@ -26,26 +26,20 @@ class BrowserWebSocketTransport(Transport):
     async def receive_messages(self) -> AsyncIterator[AudioFrame | dict[str, Any]]:
         while not self._closed:
             outbound: AudioFrame | dict[str, Any] | None = None
-            with tracer.start_as_current_span("websocket.receive") as span:
-                message = await self.websocket.receive()
-                if message["type"] == "websocket.disconnect":
+            message = await self.websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                with tracer.start_as_current_span("websocket.receive") as span:
                     set_span_attributes(span, message_type="websocket.disconnect")
-                    self._closed = True
-                    return
-                if message.get("bytes") is not None:
-                    set_span_attributes(
-                        span,
-                        message_type="audio.chunk",
-                        audio_bytes=len(message["bytes"]),
-                        sample_rate=self.sample_rate,
-                        channels=self.channels,
-                    )
-                    outbound = AudioFrame(
-                        data=message["bytes"],
-                        sample_rate=self.sample_rate,
-                        channels=self.channels,
-                    )
-                elif message.get("text"):
+                self._closed = True
+                return
+            if message.get("bytes") is not None:
+                outbound = AudioFrame(
+                    data=message["bytes"],
+                    sample_rate=self.sample_rate,
+                    channels=self.channels,
+                )
+            elif message.get("text"):
+                with tracer.start_as_current_span("websocket.receive") as span:
                     payload = json.loads(message["text"])
                     set_span_attributes(
                         span,
@@ -75,12 +69,25 @@ class BrowserWebSocketTransport(Transport):
             )
             await self.websocket.send_json({"type": event_type, **payload})
 
-    async def send_audio(self, audio_chunk: bytes) -> None:
+    async def send_audio(
+        self,
+        audio_chunk: bytes,
+        *,
+        call_id: str,
+        turn_id: str,
+        response_id: str,
+        sequence: int,
+        sample_rate: int,
+    ) -> None:
         await self.send_json(
             "audio.chunk",
+            call_id=call_id,
+            turn_id=turn_id,
+            response_id=response_id,
+            sequence=sequence,
             audio=base64.b64encode(audio_chunk).decode(),
             encoding="pcm_s16le",
-            sample_rate=24000,
+            sample_rate=sample_rate,
             channels=1,
         )
 

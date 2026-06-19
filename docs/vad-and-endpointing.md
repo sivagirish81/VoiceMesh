@@ -59,6 +59,11 @@ Even after endpointing, the session worker can suppress weak turns before LLM/TT
 - `low_speech_ratio`: speech frames are too sparse across the turn;
 - `empty_transcript`: STT returns only whitespace.
 
+For short but real greetings, the final transcript can rescue an imperfect VAD ratio once
+accepted speech duration is at least `VAD_MIN_TRANSCRIBED_TURN_AUDIO_MS`. This prevents a
+transcribed “Hello.” from being dropped solely because browser noise suppression or
+background noise reduced the speech-frame ratio.
+
 Ignored turns emit `vad.noise_turn_ignored` and increment Prometheus counters. They do not
 call the LLM and do not synthesize audio.
 
@@ -77,7 +82,8 @@ Increase `VAD_END_SILENCE_MS` to avoid premature turn endings. This increases re
 latency after the user stops speaking.
 
 Increase `VAD_MIN_SPEECH_FRAME_RATIO` to reject choppy/noisy turns. This may reject weak
-speech in bad network or microphone conditions.
+speech in bad network or microphone conditions. Increase
+`VAD_MIN_TRANSCRIBED_TURN_AUDIO_MS` if STT is rescuing too many noisy hallucinated turns.
 
 ## Debugging
 
@@ -88,8 +94,10 @@ The demo page shows:
   frame ratio;
 - ignored noise turn count.
 
-Jaeger spans named `pipeline.vad` include `call_id`, `turn_id`, provider, VAD decision,
-energy, noise floor, state, frame duration, speech-start/end flags, and speech ratio.
+Jaeger spans named `pipeline.vad` are emitted for VAD state transitions and turn
+endpointing, not every audio frame. They include `call_id`, `turn_id`, provider, VAD
+decision, energy, noise floor, state, frame duration, speech-start/end flags, and speech
+ratio.
 
 Prometheus metrics use stable labels only:
 
@@ -98,6 +106,15 @@ Prometheus metrics use stable labels only:
 - `voicemesh_vad_noise_turns_ignored_total{provider,reason_code}`;
 - `voicemesh_vad_turn_duration_seconds{provider,outcome}`;
 - `voicemesh_vad_endpoint_delay_seconds{provider}`.
+
+## Barge-In Confirmation
+
+Browser microphone energy can create a speculative `client.barge_in_candidate` while
+assistant audio is playing. Backend VAD/endpointing is the confirmation layer: sustained
+speech and speech-frame ratio determine whether the candidate becomes confirmed or is
+rejected as noise, echo, or a short spike. Kafka, Temporal, Postgres, Prometheus,
+Grafana, Jaeger, and future analytics stores observe barge-in outcomes but do not
+participate in the live decision.
 
 Run a deterministic local sanity check:
 

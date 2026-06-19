@@ -78,7 +78,10 @@ VoiceMesh treats them separately.
 
 ```mermaid
 flowchart TD
-    Speech["User speech starts during agent output"] --> Cancel["Cancel active response_id"]
+    Speech["Possible user speech during agent output"] --> Candidate["BARGE_IN_CANDIDATE"]
+    Candidate --> Confirm["Backend VAD/STT confirmation"]
+    Candidate --> Reject["Reject noise / echo / harmless spike"]
+    Confirm --> Cancel["Cancel active response_id"]
     Cancel --> FlushText["Flush llm_to_tts chunks for old response"]
     Cancel --> FlushAudio["Flush tts_to_transport chunks for old response"]
     FlushText --> DropLate["Drop late LLM/TTS chunks by response fence"]
@@ -86,10 +89,11 @@ flowchart TD
     DropLate --> NewTurn["Continue with new turn_id / response_id"]
 ```
 
-The current server-side runtime implements response fencing, queue flushing, stale
-chunk drops, and cancellation-state release for waiting producers. Full browser
-stop-playback semantics and provider-native request cancellation are still production
-hardening work.
+The browser WebSocket POC reacts speculatively by stopping playback and sending a
+candidate. The backend confirms or rejects that candidate using local VAD/STT evidence.
+Only confirmed barge-in fences the response and flushes matching queue items. Exact
+browser playback resume after a rejected candidate is best-effort; provider-native
+request cancellation remains a future hardening task.
 
 ## Observability
 

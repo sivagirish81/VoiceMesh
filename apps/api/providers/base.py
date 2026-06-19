@@ -77,6 +77,9 @@ class LLMProvider(ABC):
     @abstractmethod
     def consume_usage(self) -> TokenUsage: ...
 
+    async def cancel(self, response_id: str) -> None:
+        return None
+
 
 class TTSProvider(ABC):
     name: str
@@ -88,10 +91,22 @@ class TTSProvider(ABC):
     @abstractmethod
     def consume_usage(self) -> SpeechUsage: ...
 
+    async def cancel(self, response_id: str) -> None:
+        return None
+
 
 class Transport(ABC):
     @abstractmethod
     def receive_audio(self) -> AsyncIterator[bytes]: ...
 
     @abstractmethod
-    async def send_audio(self, audio_chunk: bytes) -> None: ...
+    async def send_audio(
+        self,
+        audio_chunk: bytes,
+        *,
+        call_id: str,
+        turn_id: str,
+        response_id: str,
+        sequence: int,
+        sample_rate: int,
+    ) -> None: ...

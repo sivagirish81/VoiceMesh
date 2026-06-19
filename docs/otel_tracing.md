@@ -73,7 +73,8 @@ Track:
 
 - queued speak-ahead milliseconds and queued audio milliseconds;
 - cork and uncork count plus duration;
-- barge-in cancellation latency;
+- barge-in candidate, confirmation, rejection, cancellation, and semantic-resolution
+  latency;
 - stale tokens and audio chunks dropped;
 - provider timeout and error rate by provider/model;
 - Kafka produce failures and consumer lag;
@@ -86,12 +87,13 @@ Track:
 
 The current POC exposes stage latency, LLM first-token latency, TTS first-audio latency,
 weighted queue depth, queue item count, VAD decisions/state/noise-turn metrics,
-hard-limit events, stale-chunk drops, backpressure transitions/duration, duplicates,
-provider failures, Kafka consumer lag, event-worker batch size/duration, Postgres
-projection latency/errors, Temporal workflow/activity counters, billing readiness
-observations, webhook delivery attempts, DB write failures, and active calls. It does
-not yet measure true end-of-speech to first audible client playback, browser
-stop-playback latency, or Postgres pool wait.
+barge-in candidate/confirmation/rejection/classification metrics, hard-limit events,
+stale-chunk drops, backpressure transitions/duration, duplicates, provider failures,
+Kafka consumer lag, event-worker batch size/duration, Postgres projection
+latency/errors, Temporal workflow/activity counters, billing readiness observations,
+webhook delivery attempts, DB write failures, and active calls. It does not yet measure
+true end-of-speech to first audible client playback, sample-accurate browser resume
+latency, or Postgres pool wait.
 
 ## Prometheus And Grafana Scope
 
@@ -146,9 +148,10 @@ pipeline events; paste that ID directly into Jaeger when a trace is hard to find
 For a useful call trace, expect to see:
 
 - `voice.call` as the parent span for a browser/WebSocket call;
-- `websocket.receive` and `websocket.send` spans with message type and audio-byte
-  attributes;
-- `pipeline.vad`, `pipeline.stt`, `pipeline.llm`, `pipeline.tts`, and
+- `websocket.receive` spans for control messages/disconnects and `websocket.send` spans
+  with message type and audio-byte attributes;
+- turn-level/state-transition `pipeline.vad`, `pipeline.stt`, `pipeline.llm`,
+  `pipeline.tts`, and
   `pipeline.backpressure` spans;
 - `provider.openai.stt.connect`, `provider.openai.stt.commit`,
   `provider.openai.llm.responses_stream`, and `provider.openai.tts.speech_stream`

@@ -185,19 +185,27 @@ sequenceDiagram
 
     TTS->>Transport: Audio for turn N / response N
     Transport-->>User: Agent speech
-    User->>Session: New speech begins
-    Session->>Transport: Stop playback for response N
-    Session->>TTS: Cancel response N
-    Session->>LLM: Cancel or ignore response N
-    Session->>Session: Drop queued audio for response N
-    Session->>Session: Advance to turn N+1
-    Session->>LLM: Final transcript for turn N+1
+    User->>Transport: Possible speech while agent is speaking
+    Transport->>Session: client.barge_in_candidate(response N)
+    Transport-->>User: Speculative stop / duck playback
+    Session->>Session: Confirm or reject with backend VAD/STT
+    alt candidate rejected
+      Session->>Transport: Continue / best-effort resume
+    else candidate confirmed
+      Session->>Transport: Cancel playback for response N
+      Session->>TTS: Best-effort cancel response N
+      Session->>LLM: Cancel or ignore response N
+      Session->>Session: Drop queued output for response N
+      Session->>Session: Advance to turn N+1
+      Session->>LLM: Final transcript + semantic resolution for turn N+1
+    end
 ```
 
 Cancellation is cooperative where provider APIs support it and defensive everywhere
-else. Before sending a token or audio chunk, the worker verifies that its `turn_id` and
-`response_id` still match the active generation. Late provider output is counted and
-dropped rather than played.
+else. Browser detection is speculative; backend confirmation is authoritative. Before
+sending a token or audio chunk, the worker verifies that its `turn_id` and `response_id`
+still match the active generation. Late provider output is counted and dropped rather
+than played.
 
 ## Provider Adapters
 
@@ -268,7 +276,8 @@ flowchart LR
 | STT | Long-lived OpenAI Realtime transcription session receives resampled 24 kHz PCM, emits partial deltas, and is manually committed at the VAD turn boundary | Add provider cancellation, item-order reconciliation, domain evaluation, and fallback routing |
 | LLM | OpenAI streaming text deltas | Streaming adapter with response IDs, cancellation, tool-call normalization, and provider routing |
 | TTS | Phrase-triggered OpenAI PCM stream | Streaming adapter with cancellable response IDs and playback acknowledgements |
-| Backpressure | Weighted `llm_to_tts` speak-ahead and `tts_to_transport` audio-duration queues with response fences, stale drops, hard limits, and cork/uncork callbacks | Tune budgets from measured speech/playback rates, add browser playback acknowledgements, and route severe degradation to SLO escalation |
+| Barge-in | Browser speculative candidates, backend VAD confirmation, response fencing, stale audio rejection, and rule-based semantic resolution | Transport-native candidate signals, sample-accurate resume, neural/noise-aware intent policy, and provider-native abort |
+| Backpressure | Weighted `llm_to_tts` speak-ahead and `tts_to_transport` audio-duration queues with response fences, stale drops, hard limits, and cork/uncork callbacks | Tune budgets from measured speech/playback rates and route severe degradation to SLO escalation |
 | Kafka | Publishes coarse lifecycle, stage, provider, usage, and backpressure events; no raw frames, LLM tokens, or TTS chunks | Add schema registry, W3C headers, lag SLOs, and bounded asynchronous publication |
 | Postgres | Dedicated Kafka event worker projects calls, events, metrics, usage, billing, and idempotency outside the provider chain | Separate ingestion/query pools, reconciliation tooling, and tenant-aware retention |
 | Outbox | Billing events created from a DB usage projection are written atomically to the outbox and published once by the worker | Scale publishers with leases, stronger delivery metrics, and explicit event ownership |

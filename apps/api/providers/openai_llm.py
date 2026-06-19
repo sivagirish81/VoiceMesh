@@ -1,6 +1,6 @@
 import time
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 
 from openai import AsyncOpenAI
 from opentelemetry import trace
@@ -45,21 +45,13 @@ class OpenAILLMProvider(LLMProvider):
             )
             if self._failure_injector:
                 await self._failure_injector.before_provider("llm")
-            stream = await self._client.responses.create(
+            stream: Any = await self._client.responses.create(
                 model=self.model,
-                input=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are the voice assistant inside VoiceMesh, a reliability lab. "
-                            "Answer clearly and conversationally in two or three short sentences."
-                        ),
-                    },
-                    {"role": "user", "content": transcript},
-                ],
+                input=cast(Any, self._build_input(transcript, call_context)),
                 stream=True,
             )
-            async for event in stream:
+            async for raw_event in stream:
+                event: Any = raw_event
                 if event.type == "response.output_text.delta":
                     if self._failure_injector:
                         await self._failure_injector.delay("llm")
@@ -105,3 +97,49 @@ class OpenAILLMProvider(LLMProvider):
         usage = self._usage
         self._usage = TokenUsage()
         return usage
+
+    async def cancel(self, response_id: str) -> None:
+        with tracer.start_as_current_span("provider.openai.llm.cancel") as span:
+            set_span_attributes(
+                span,
+                provider="openai",
+                provider_stage="llm",
+                model=self.model,
+                response_id=response_id,
+                cancellation_mode="local_fence",
+            )
+
+    def _build_input(self, transcript: str, call_context: dict[str, Any]) -> list[dict[str, str]]:
+        messages: list[dict[str, str]] = [
+            {
+                "role": "system",
+                "content": (
+                    "You are the voice assistant inside VoiceMesh, a reliability lab. "
+                    "Answer clearly and conversationally in two or three short sentences. "
+                    "If interruption metadata is present, only treat the spoken prefix as "
+                    "heard by the user; do not assume unplayed generated text was heard."
+                ),
+            }
+        ]
+        for item in call_context.get("messages") or []:
+            role = item.get("role")
+            if role not in {"user", "assistant"}:
+                continue
+            content = item.get("content") or item.get("spoken_text") or ""
+            if content:
+                messages.append({"role": role, "content": str(content)})
+        barge_in = call_context.get("barge_in")
+        if barge_in:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "Interruption context: "
+                        f"semantic={barge_in.get('semantic')}; "
+                        f"instruction={barge_in.get('instruction')}; "
+                        f"metadata={barge_in.get('interruption')}"
+                    ),
+                }
+            )
+        messages.append({"role": "user", "content": transcript})
+        return messages
