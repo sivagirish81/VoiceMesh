@@ -58,8 +58,20 @@ class Settings(BaseSettings):
     backpressure_hard_limit_policy: str = "cancel_response"
     tts_output_sample_rate: int = Field(default=24000, ge=8000)
     turn_timeout_seconds: float = Field(default=30, gt=0)
+    vad_provider: str = "webrtc"
     vad_energy_threshold: float = Field(default=0.018, gt=0)
-    vad_silence_ms: int = Field(default=700, ge=100)
+    vad_sample_rate: int = Field(default=16000, ge=8000)
+    vad_frame_ms: int = Field(default=20, ge=10)
+    webrtc_vad_mode: int = Field(default=2, ge=0, le=3)
+    vad_min_speech_ms: int = Field(default=200, ge=0)
+    vad_end_silence_ms: int = Field(default=700, ge=100)
+    vad_speech_pad_ms: int = Field(default=150, ge=0)
+    vad_min_turn_audio_ms: int = Field(default=300, ge=0)
+    vad_min_speech_frame_ratio: float = Field(default=0.60, ge=0, le=1)
+    vad_enable_browser_noise_suppression: bool = True
+    energy_vad_adaptive_noise_floor: bool = True
+    energy_vad_noise_multiplier: float = Field(default=3.0, gt=1)
+    energy_vad_noise_update_alpha: float = Field(default=0.05, gt=0, le=1)
     websocket_max_audio_bytes: int = 25 * 1024 * 1024
 
     failure_injection_enabled: bool = False
@@ -100,6 +112,12 @@ class Settings(BaseSettings):
             "fail_turn",
         }:
             raise ValueError("BACKPRESSURE_HARD_LIMIT_POLICY is not supported")
+        if self.vad_provider not in {"webrtc", "energy", "silero"}:
+            raise ValueError("VAD_PROVIDER must be one of: webrtc, energy, silero")
+        if self.vad_frame_ms not in {10, 20, 30}:
+            raise ValueError("VAD_FRAME_MS must be 10, 20, or 30")
+        if self.vad_sample_rate not in {8000, 16000, 32000, 48000}:
+            raise ValueError("VAD_SAMPLE_RATE must be one of 8000, 16000, 32000, or 48000")
         return self
 
     def validate_provider_credentials(self) -> None:

@@ -11,6 +11,27 @@ type PipelineView = {
   corked: boolean;
   cork_reason?: string | null;
   queue_depths: Record<string, number>;
+  vad?: {
+    provider?: string;
+    state?: string;
+    decision?: string;
+    energy?: number | null;
+    noise_floor?: number | null;
+    probability?: number | null;
+    sample_rate?: number;
+    frame_duration_ms?: number;
+    speech_duration_ms?: number;
+    total_duration_ms?: number;
+    speech_frame_ratio?: number;
+  };
+};
+
+type MicDebug = {
+  echoCancellation?: boolean;
+  noiseSuppression?: boolean;
+  autoGainControl?: boolean;
+  sampleRate?: number;
+  channelCount?: number;
 };
 
 function floatToInt16(input: Float32Array): ArrayBuffer {
@@ -30,6 +51,8 @@ export default function DemoPage() {
   const [transcript, setTranscript] = useState("");
   const [response, setResponse] = useState("");
   const [events, setEvents] = useState<PipelineEvent[]>([]);
+  const [micDebug, setMicDebug] = useState<MicDebug>({});
+  const [ignoredNoiseTurns, setIgnoredNoiseTurns] = useState(0);
   const [pipeline, setPipeline] = useState<PipelineView>({
     stage: "transport", corked: false, queue_depths: {},
   });
@@ -64,17 +87,36 @@ export default function DemoPage() {
     setPartialTranscript("");
     setTranscript("");
     setResponse("");
+    setIgnoredNoiseTurns(0);
+    setMicDebug({});
     const socket = new WebSocket(`${WS_URL}/ws/calls/${id}`);
     websocket.current = socket;
     socket.onopen = async () => {
       setConnected(true);
       const media = await navigator.mediaDevices.getUserMedia({
-        audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true},
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
       });
       stream.current = media;
       const context = new AudioContext();
       audioContext.current = context;
       await context.resume();
+      const settings = media.getAudioTracks()[0]?.getSettings() as MediaTrackSettings & {
+        autoGainControl?: boolean;
+        echoCancellation?: boolean;
+        noiseSuppression?: boolean;
+      };
+      setMicDebug({
+        echoCancellation: settings?.echoCancellation,
+        noiseSuppression: settings?.noiseSuppression,
+        autoGainControl: settings?.autoGainControl,
+        sampleRate: settings?.sampleRate ?? context.sampleRate,
+        channelCount: settings?.channelCount ?? 1,
+      });
       const source = context.createMediaStreamSource(media);
       const node = context.createScriptProcessor(2048, 1, 1);
       processor.current = node;
@@ -102,6 +144,9 @@ export default function DemoPage() {
       if (data.type === "pipeline.event") {
         setEvents((current) => [...current.slice(-199), data.event]);
         setPipeline(data.state);
+      }
+      if (data.type === "vad.noise_turn_ignored") {
+        setIgnoredNoiseTurns((current) => current + 1);
       }
       if (data.type === "pipeline.state") setPipeline(data.state);
       if (data.type === "pipeline.corked" || data.type === "pipeline.uncorked") {
@@ -152,6 +197,26 @@ export default function DemoPage() {
         <div className="card"><h3>Transport</h3><div className={`status ${connected ? "" : "idle"}`}>{connected ? "connected" : "idle"}</div></div>
         <div className="card"><h3>Microphone</h3><div className={`status ${recording ? "" : "idle"}`}>{recording ? "streaming PCM" : "stopped"}</div></div>
         <div className="card"><h3>Backpressure</h3><div className={`status ${pipeline.corked ? "corked" : ""}`}>{pipeline.corked ? "corked" : "uncorked"}</div></div>
+      </div>
+      <div className="grid two">
+        <div className="card">
+          <h3>Browser mic controls</h3>
+          <div className="mono muted">
+            echoCancellation: {String(micDebug.echoCancellation ?? "unknown")}<br />
+            noiseSuppression: {String(micDebug.noiseSuppression ?? "unknown")}<br />
+            autoGainControl: {String(micDebug.autoGainControl ?? "unknown")}<br />
+            sampleRate: {micDebug.sampleRate ?? "unknown"} / channels: {micDebug.channelCount ?? "unknown"}
+          </div>
+        </div>
+        <div className="card">
+          <h3>VAD debug</h3>
+          <div className="mono muted">
+            provider: {pipeline.vad?.provider ?? "unknown"} / state: {pipeline.vad?.state ?? "idle"}<br />
+            decision: {pipeline.vad?.decision ?? "unknown"} / ignored noise turns: {ignoredNoiseTurns}<br />
+            energy: {pipeline.vad?.energy?.toFixed(4) ?? "n/a"} / noise_floor: {pipeline.vad?.noise_floor?.toFixed(4) ?? "n/a"}<br />
+            speech_ms: {pipeline.vad?.speech_duration_ms?.toFixed(0) ?? "0"} / ratio: {pipeline.vad?.speech_frame_ratio?.toFixed(2) ?? "0.00"}
+          </div>
+        </div>
       </div>
       <div className="grid two">
         <div className="card">

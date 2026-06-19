@@ -24,7 +24,9 @@ provider socket or browser audio buffer.
 `StreamModule` is the current session worker. It:
 
 - receives real PCM from `BrowserWebSocketTransport`;
-- runs RMS energy VAD and silence-based endpointing;
+- runs pluggable VAD, defaulting to WebRTC VAD over a normalized 16 kHz PCM copy;
+- smooths VAD output through `QUIET`, `STARTING`, `SPEAKING`, and `STOPPING` endpointing;
+- suppresses short, sparse, or empty-transcript noise turns before they reach the LLM;
 - keeps an OpenAI Realtime transcription WebSocket open for the call;
 - resamples browser PCM to 24 kHz, appends frames as speech arrives, displays transcript
   deltas, and commits the provider buffer at the VAD/end-turn boundary;

@@ -81,14 +81,17 @@ Track:
 - Temporal workflow/activity latency, retries, and stuck executions;
 - webhook delivery latency, retry count, and terminal failure; and
 - active calls, admission rejects, and per-tenant concurrency.
+- VAD frame decisions, state transitions, endpoint delay, ignored noise turns, and turn
+  duration by accepted/ignored outcome.
 
 The current POC exposes stage latency, LLM first-token latency, TTS first-audio latency,
-weighted queue depth, queue item count, hard-limit events, stale-chunk drops,
-backpressure transitions/duration, duplicates, provider failures, Kafka consumer lag,
-event-worker batch size/duration, Postgres projection latency/errors, Temporal
-workflow/activity counters, billing readiness observations, webhook delivery attempts,
-DB write failures, and active calls. It does not yet measure true end-of-speech to
-first audible client playback, browser stop-playback latency, or Postgres pool wait.
+weighted queue depth, queue item count, VAD decisions/state/noise-turn metrics,
+hard-limit events, stale-chunk drops, backpressure transitions/duration, duplicates,
+provider failures, Kafka consumer lag, event-worker batch size/duration, Postgres
+projection latency/errors, Temporal workflow/activity counters, billing readiness
+observations, webhook delivery attempts, DB write failures, and active calls. It does
+not yet measure true end-of-speech to first audible client playback, browser
+stop-playback latency, or Postgres pool wait.
 
 ## Prometheus And Grafana Scope
 
@@ -97,10 +100,10 @@ provisioned from `infra/grafana/dashboards` and are organized around operational
 questions:
 
 - `VoiceMesh Overview`: active calls, call lifecycle rate, provider failures, latency,
-  weighted queue depth, corking, Kafka lag, Postgres projection health, Temporal
-  failures, and webhook failures.
+  weighted queue depth, corking, VAD decisions/noise turns/state transitions, Kafka lag,
+  Postgres projection health, Temporal failures, and webhook failures.
 - `VoiceMesh Live Pipeline Latency`: STT, LLM, TTS, and transport-lag proxy panels for
-  the hot path.
+  the hot path, plus VAD endpointing and turn-duration panels.
 - `VoiceMesh Backpressure & Corking`: queued speak-ahead/audio milliseconds, queue
   items, hard-limit events, stale drops, cork/uncork counts, cork duration, and the
   stages causing the most corking.

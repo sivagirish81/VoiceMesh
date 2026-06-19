@@ -9,8 +9,9 @@ Open `http://localhost:3000/demo`. Start the microphone and say:
 
 > Explain why backpressure matters in a live voice pipeline.
 
-Pause. Point out real PCM capture, RMS VAD, OpenAI Realtime STT deltas before the final
-turn, streaming OpenAI LLM output, phrase-level OpenAI TTS, and browser playback.
+Pause. Point out real PCM capture, browser noise controls, WebRTC VAD debug state,
+OpenAI Realtime STT deltas before the final turn, streaming OpenAI LLM output,
+phrase-level OpenAI TTS, and browser playback.
 
 ## 0:35-1:00 - Runtime And Observability
 
