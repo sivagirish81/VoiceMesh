@@ -211,7 +211,6 @@ class StreamModule:
             )
             try:
                 self._stt_session = await self.stt.open_stream(self._on_stt_delta)
-                await self.temporal.start_call(self.call_id)
                 await self.emit(
                     EventType.CALL_STARTED,
                     "transport",
@@ -1570,11 +1569,6 @@ class StreamModule:
             stage,
             payload={"provider": provider, "error": str(exc)},
         )
-        await self.temporal.signal(
-            self.call_id,
-            "provider_failed",
-            {"stage": stage, "provider": provider, "error": str(exc)},
-        )
 
     async def emit(
         self,
@@ -1619,7 +1613,6 @@ class StreamModule:
             turn_id="session",
             payload={"error": error},
         )
-        await self.temporal.signal(self.call_id, "call_failed", {"error": error})
         await self._safe_send_json("error", message=error)
 
     async def _safe_send_json(self, event_type: str, **payload: Any) -> None:
@@ -1647,10 +1640,4 @@ class StreamModule:
                 "duration_seconds": time.monotonic() - self._call_started_at,
             },
         )
-        with suppress(Exception):
-            await self.temporal.signal(
-                self.call_id,
-                "call_completed",
-                {"summary": self.state.response},
-            )
         await self._safe_send_json("call.ended", call_id=self.call_id)

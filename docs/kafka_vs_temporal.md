@@ -78,10 +78,13 @@ Examples:
 
 ## Current POC
 
-The current `CallWorkflow` starts at call admission and receives high-level call and
-provider-failure signals. Routine cork/uncork remains inside `StreamModule` and is
-published to Kafka only for the reliability timeline.
+Normal browser calls no longer start `CallWorkflow` at call admission. The session
+worker emits `call.started`, `call.ended`, usage, provider, and pipeline events to
+Kafka/Postgres while keeping the live media path local and in memory.
 
-The production direction is to start workflows only when an outer-loop lifecycle
-action must survive process loss. Provider failover remains local when it must happen
-within a live latency budget.
+Temporal is started only when an outer-loop lifecycle action must survive process loss:
+billing finalization, durable tool actions, webhook delivery, billing adjustment, or an
+explicit post-call completion workflow. The legacy `CallWorkflow` remains available as a
+manual/compatibility artifact, but it is not part of the default live-call path.
+
+Provider failover remains local when it must happen within a live latency budget.

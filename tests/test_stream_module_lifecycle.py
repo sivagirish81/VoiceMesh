@@ -178,9 +178,7 @@ async def test_end_call_publishes_final_events_when_debug_websocket_is_closed() 
         EventType.USAGE_FINALIZATION_BARRIER,
         EventType.CALL_ENDED,
     ]
-    assert module.temporal.signals == [
-        ("call-test", "call_completed", {"summary": ""}),
-    ]
+    assert module.temporal.signals == []
 
 
 @pytest.mark.asyncio
