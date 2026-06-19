@@ -79,6 +79,7 @@ class Settings(BaseSettings):
     barge_in_backend_echo_grace_ms: int = Field(default=600, ge=0)
     barge_in_backend_confirmation_ms: int = Field(default=350, ge=0)
     barge_in_backend_min_speech_ratio: float = Field(default=0.75, ge=0, le=1)
+    barge_in_recent_response_grace_ms: int = Field(default=6000, ge=0)
     energy_vad_adaptive_noise_floor: bool = True
     energy_vad_noise_multiplier: float = Field(default=3.0, gt=1)
     energy_vad_noise_update_alpha: float = Field(default=0.05, gt=0, le=1)

@@ -320,8 +320,6 @@ class StreamModule:
         if update.state == VADState.STARTING:
             self._pending_vad_frames.append(frame)
         if update.started:
-            if self.state.active_response_id:
-                await self._confirm_barge_in_from_vad(update)
             self.state.turn_id = str(uuid4())
             self._turn_has_audio = False
             self._turn_audio_bytes = 0
@@ -342,6 +340,11 @@ class StreamModule:
             )
         elif update.collect_audio and update.state != VADState.STARTING:
             await self._append_turn_audio(frame)
+        if (
+            self.state.active_response_id
+            and update.state in {VADState.SPEAKING, VADState.STOPPING}
+        ):
+            await self._confirm_barge_in_from_vad(update)
         if update.ended:
             self._turn_stats_by_id[self.state.turn_id] = {
                 "speech_duration_ms": update.speech_duration_ms,
@@ -388,6 +391,8 @@ class StreamModule:
                 played_audio_ms=candidate.played_audio_ms,
                 last_played_sequence=candidate.last_played_sequence,
             )
+            if candidate.response_id != self._barge_in.active_response_id:
+                self._restore_recent_response_for_candidate(candidate)
             transition = self._barge_in.candidate(candidate)
             set_span_attributes(
                 span,
@@ -540,6 +545,31 @@ class StreamModule:
         last_audio_sent_at = self._response_last_audio_sent_at.get(response_id)
         return last_audio_sent_at is not None and now - last_audio_sent_at < grace_seconds
 
+    def _restore_recent_response_for_candidate(self, candidate: BargeInCandidate) -> bool:
+        if candidate.response_id in self._responses.cancelled:
+            return False
+        response_turn_id = self._responses.response_turns.get(candidate.response_id)
+        if not response_turn_id:
+            return False
+        last_audio_sent_at = self._response_last_audio_sent_at.get(candidate.response_id)
+        if last_audio_sent_at is None:
+            return False
+        audible_grace_seconds = max(
+            self.settings.barge_in_recent_response_grace_ms / 1000,
+            self._response_estimated_ms_by_id.get(candidate.response_id, 0.0) / 1000 + 1.0,
+        )
+        if time.monotonic() - last_audio_sent_at > audible_grace_seconds:
+            return False
+        turn_id = candidate.turn_id or response_turn_id
+        self._responses.active_response_id = candidate.response_id
+        self.state.active_response_id = candidate.response_id
+        self._playback_done_response_ids.discard(candidate.response_id)
+        self._barge_in.assistant_playing(
+            turn_id=turn_id,
+            response_id=candidate.response_id,
+        )
+        return True
+
     async def _append_turn_audio(self, frame: AudioFrame) -> None:
         self._turn_audio_bytes += len(frame.data)
         if self._turn_audio_bytes > self.settings.websocket_max_audio_bytes:
@@ -569,6 +599,8 @@ class StreamModule:
                 await self._ignore_noise_turn(turn_id, ignored_reason)
                 return
             semantic = await self._resolve_barge_in_semantics(turn_id, transcript)
+            if semantic is None:
+                semantic = self._semantic_for_short_turn(transcript)
             if (
                 semantic == BargeInSemantic.BACKCHANNEL
                 and self.settings.barge_in_backchannel_policy != "high"
@@ -720,14 +752,28 @@ class StreamModule:
         speech_duration_ms = stats.get("speech_duration_ms", 0.0)
         speech_frame_ratio = stats.get("speech_frame_ratio", 0.0)
         cleaned_transcript = transcript.strip()
+        normalized_transcript = " ".join(
+            cleaned_transcript.lower().strip(" \t\n\r.,!?").split()
+        )
         if speech_duration_ms < self.settings.vad_min_turn_audio_ms:
             return "too_short"
         if not cleaned_transcript:
             return "empty_transcript"
+        if (
+            normalized_transcript in {"hi", "hello", "hey"}
+            and speech_duration_ms >= 500
+        ):
+            return None
         if speech_frame_ratio < self.settings.vad_min_speech_frame_ratio:
             if speech_duration_ms >= self.settings.vad_min_transcribed_turn_audio_ms:
                 return None
             return "low_speech_ratio"
+        return None
+
+    def _semantic_for_short_turn(self, transcript: str) -> BargeInSemantic | None:
+        semantic = classify_interruption(transcript)
+        if semantic == BargeInSemantic.BACKCHANNEL:
+            return semantic
         return None
 
     def _record_turn_outcome(self, turn_id: str, outcome: str) -> None:
