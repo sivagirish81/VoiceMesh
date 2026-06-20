@@ -40,7 +40,9 @@ flowchart LR
     Kafka --> WorkflowBridge["Temporal starter / signaler"]
 
     Writers --> Postgres["Postgres system of record"]
+    Postgres --> PeerDB["PeerDB CDC<br/>billing tables only"]
     CHConsumer --> ClickHouse["ClickHouse Cloud analytics store"]
+    PeerDB --> ClickHouse
     WorkflowBridge --> Temporal["Temporal durable outer loop"]
     Temporal --> Activities["Activities"]
     Activities --> Postgres
@@ -128,6 +130,15 @@ The analytics consumer has its own Kafka consumer group and commits offsets only
 ClickHouse acknowledges a batch insert. If ClickHouse is unavailable, the consumer
 retries and dashboards become stale; active calls continue normally. See
 [clickhouse-cloud.md](clickhouse-cloud.md).
+
+For billing analytics, VoiceMesh also supports a stricter CDC path:
+
+`Kafka usage event -> Postgres UsageWriter -> committed billing rows -> PeerDB -> ClickHouse Cloud`
+
+In this path, Postgres has the final say. ClickHouse receives `call_usage_events`,
+`billing_line_items`, `final_call_billing_records`, and `billing_adjustments` only after
+they commit to Postgres. Grafana queries current-state views over those replicated
+tables. See [peerdb-clickhouse-cdc.md](peerdb-clickhouse-cdc.md).
 
 ### Temporal
 

@@ -20,6 +20,7 @@ Postgres, OpenTelemetry, Jaeger, Prometheus, and Grafana.
 - Per-call provider usage metering and a finalized billing ledger
 - OpenTelemetry traces and Prometheus metrics
 - Optional ClickHouse Cloud analytics projection for historical cross-call dashboards
+- Optional PeerDB CDC path from committed Postgres billing rows into ClickHouse Cloud
 - Provider latency/failure and database-outage injection
 - A Next.js dashboard with browser microphone and PCM playback
 
@@ -126,6 +127,13 @@ barge-in, and noise-handling trends. ClickHouse is outside the live media path; 
 continue if the Cloud service, consumer, or dashboards are unavailable. See
 [docs/clickhouse-cloud.md](docs/clickhouse-cloud.md).
 
+Billing analytics can also use the stricter CDC path:
+
+`Kafka usage event -> Postgres UsageWriter -> committed billing rows -> PeerDB CDC -> ClickHouse Cloud -> Grafana`
+
+In that flow, Postgres remains the billing authority and ClickHouse only receives
+committed billing state. See [docs/peerdb-clickhouse-cdc.md](docs/peerdb-clickhouse-cdc.md).
+
 See [docs/kafka_vs_temporal.md](docs/kafka_vs_temporal.md),
 [docs/events.md](docs/events.md), and
 [docs/postgres_reliability.md](docs/postgres_reliability.md).
@@ -231,6 +239,18 @@ available:
 
 - `VoiceMesh Call Performance Analytics`
 - `VoiceMesh Reliability & Interaction Quality`
+- `VoiceMesh Cost & Unit Economics`
+- `VoiceMesh Billing Integrity & CDC Health`
+
+For billing CDC:
+
+```bash
+make up-cdc
+make peerdb-postgres-setup
+make clickhouse-cdc-bootstrap
+make peerdb-create-mirror
+make demo-billing-cdc
+```
 
 ### TTS Backpressure
 

@@ -10,6 +10,8 @@ PYTHON ?= .venv/bin/python
 	demo-full-call-refund-trace demo-noise-vad demo-barge-in-confirmed \
 	demo-barge-in-noise-rejected demo-barge-in-backchannel clickhouse-cloud-check \
 	clickhouse-cloud-bootstrap clickhouse-consumer demo-clickhouse-cloud test-clickhouse \
+	up-cdc peerdb-check peerdb-postgres-setup clickhouse-cdc-bootstrap \
+	peerdb-create-peers peerdb-create-mirror peerdb-status demo-billing-cdc \
 	smoke-live-pipeline test lint
 
 up:
@@ -36,6 +38,28 @@ event-worker:
 
 clickhouse-consumer:
 	docker compose --profile analytics up --build clickhouse-worker
+
+up-cdc:
+	docker compose --profile analytics --profile cdc -f docker-compose.yml -f docker-compose.peerdb.yml up --build -d
+
+peerdb-check:
+	$(PYTHON) scripts/peerdb_status.py
+
+peerdb-postgres-setup:
+	$(PYTHON) scripts/peerdb_postgres_setup.py
+
+clickhouse-cdc-bootstrap:
+	$(PYTHON) scripts/clickhouse_cdc_bootstrap.py
+
+peerdb-create-peers:
+	$(PYTHON) scripts/peerdb_render_flow_sql.py
+
+peerdb-create-mirror:
+	$(PYTHON) scripts/peerdb_render_flow_sql.py
+	psql "port=9900 host=localhost password=$${PEERDB_SQL_PASSWORD:-peerdb}" -v ON_ERROR_STOP=1 -f tmp/peerdb_billing_mirror.flow.sql
+
+peerdb-status:
+	$(PYTHON) scripts/peerdb_status.py
 
 dashboard:
 	cd apps/dashboard && npm run dev
@@ -90,6 +114,9 @@ clickhouse-cloud-bootstrap:
 
 demo-clickhouse-cloud:
 	$(PYTHON) scripts/demo_clickhouse_cloud.py
+
+demo-billing-cdc:
+	$(PYTHON) scripts/demo_billing_cdc.py
 
 test-clickhouse:
 	$(PYTEST) -q tests/test_clickhouse_config.py tests/test_clickhouse_normalizer.py tests/test_clickhouse_writer.py

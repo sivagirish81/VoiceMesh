@@ -678,22 +678,48 @@ async def finalize_call_billing(data: dict[str, Any]) -> dict[str, Any]:
         await _execute(
             """
             INSERT INTO final_call_billing_records (
-                call_id, tenant_id, assistant_id, started_at, ended_at, billable_seconds,
+                call_id, tenant_id, assistant_id, started_at, ended_at,
+                connected_seconds, billable_seconds,
                 platform_cost_cents, stt_cost_cents, llm_cost_cents, tts_cost_cents,
-                telephony_cost_cents, total_cost_cents, pricing_version, status,
-                warnings, finalized_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,NOW())
+                telephony_cost_cents, total_cost_cents,
+                platform_cost_microunits, stt_cost_microunits, llm_cost_microunits,
+                tts_cost_microunits, telephony_cost_microunits,
+                provider_cost_total_microunits, customer_charge_total_microunits,
+                gross_margin_microunits, pricing_version, status, billing_status,
+                expected_usage_components, received_usage_components,
+                missing_usage_components, warnings, finalized_at, trace_id
+            ) VALUES (
+                $1,$2,$3,$4,$5,$6,$6,$7,$8,$9,$10,$11,$12,
+                $13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$22,
+                $23::jsonb,$24::jsonb,$25::jsonb,$26::jsonb,NOW(),$27
+            )
             ON CONFLICT (call_id) DO UPDATE SET
+                connected_seconds=EXCLUDED.connected_seconds,
                 billable_seconds=EXCLUDED.billable_seconds,
                 platform_cost_cents=EXCLUDED.platform_cost_cents,
                 stt_cost_cents=EXCLUDED.stt_cost_cents,
                 llm_cost_cents=EXCLUDED.llm_cost_cents,
                 tts_cost_cents=EXCLUDED.tts_cost_cents,
+                telephony_cost_cents=EXCLUDED.telephony_cost_cents,
                 total_cost_cents=EXCLUDED.total_cost_cents,
+                platform_cost_microunits=EXCLUDED.platform_cost_microunits,
+                stt_cost_microunits=EXCLUDED.stt_cost_microunits,
+                llm_cost_microunits=EXCLUDED.llm_cost_microunits,
+                tts_cost_microunits=EXCLUDED.tts_cost_microunits,
+                telephony_cost_microunits=EXCLUDED.telephony_cost_microunits,
+                provider_cost_total_microunits=EXCLUDED.provider_cost_total_microunits,
+                customer_charge_total_microunits=EXCLUDED.customer_charge_total_microunits,
+                gross_margin_microunits=EXCLUDED.gross_margin_microunits,
                 status=EXCLUDED.status,
+                billing_status=EXCLUDED.billing_status,
+                expected_usage_components=EXCLUDED.expected_usage_components,
+                received_usage_components=EXCLUDED.received_usage_components,
+                missing_usage_components=EXCLUDED.missing_usage_components,
                 warnings=EXCLUDED.warnings,
                 finalized_at=COALESCE(final_call_billing_records.finalized_at, NOW()),
-                updated_at=NOW()
+                updated_at=NOW(),
+                version=final_call_billing_records.version + 1,
+                trace_id=COALESCE(EXCLUDED.trace_id, final_call_billing_records.trace_id)
             """,
             data["call_id"],
             data.get("tenant_id", "local-demo-tenant"),
@@ -707,9 +733,28 @@ async def finalize_call_billing(data: dict[str, Any]) -> dict[str, Any]:
             tts_cost_cents,
             telephony_cost_cents,
             total_cost_cents,
+            platform_cost_cents * 10000,
+            stt_cost_cents * 10000,
+            llm_cost_cents * 10000,
+            tts_cost_cents * 10000,
+            telephony_cost_cents * 10000,
+            (stt_cost_cents + llm_cost_cents + tts_cost_cents + telephony_cost_cents) * 10000,
+            total_cost_cents * 10000,
+            (
+                total_cost_cents
+                - stt_cost_cents
+                - llm_cost_cents
+                - tts_cost_cents
+                - telephony_cost_cents
+            )
+            * 10000,
             data.get("pricing_version", "local-demo-v1"),
             status,
+            json.dumps(data.get("required_usage_types", [])),
+            json.dumps(data.get("present_usage_types", [])),
+            json.dumps(data.get("missing_usage_types", [])),
             json.dumps(warnings),
+            data.get("trace_id"),
         )
         set_span_attributes(
             span,
@@ -775,22 +820,32 @@ async def create_billing_adjustment(data: dict[str, Any]) -> dict[str, Any]:
         await _execute(
             """
             INSERT INTO billing_adjustments (
-                adjustment_id, call_id, tenant_id, assistant_id,
+                adjustment_id, original_line_item_id, call_id, tenant_id, assistant_id,
+                component, reason_code, provider_cost_delta_microunits,
+                customer_charge_delta_microunits, currency, pricing_version,
                 previous_total_cost_cents, recomputed_total_cost_cents,
-                delta_cost_cents, reason, source_event_id, workflow_id, status
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'CREATED')
+                delta_cost_cents, reason, source_event_id, workflow_id, status,
+                trace_id, idempotency_key
+            ) VALUES (
+                $1,NULL,$2,$3,$4,'billing',$5,$6,$6,'USD',$7,
+                $8,$9,$10,$5,$11,$12,'CREATED',$13,$14
+            )
             ON CONFLICT (call_id, source_event_id) DO NOTHING
             """,
             adjustment_id,
             data["call_id"],
             data.get("tenant_id", final["tenant_id"]),
             data.get("assistant_id", final["assistant_id"]),
+            data.get("reason", "late_usage_after_finalization"),
+            delta * 10000,
+            data.get("pricing_version", final["pricing_version"]),
             previous_total,
             recomputed_total,
             delta,
-            data.get("reason", "late_usage_after_finalization"),
             source_event_uuid,
             data.get("workflow_id"),
+            data.get("trace_id"),
+            f"billing-adjustment:{data['call_id']}:{source_event_id}",
         )
         set_span_attributes(
             span,

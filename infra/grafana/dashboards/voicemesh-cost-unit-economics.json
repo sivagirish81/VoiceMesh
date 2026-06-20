@@ -1,0 +1,83 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Total Provider Cost",
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "voicemesh-clickhouse-cloud"},
+      "fieldConfig": {"defaults": {"unit": "currencyUSD"}, "overrides": []},
+      "targets": [{"refId": "A", "format": 1, "rawSql": "SELECT sum(provider_cost_total_microunits) / 1000000 AS provider_cost FROM voicemesh.billing_calls_current WHERE $__timeFilter(finalized_at)"}],
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Customer Charges",
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "voicemesh-clickhouse-cloud"},
+      "fieldConfig": {"defaults": {"unit": "currencyUSD"}, "overrides": []},
+      "targets": [{"refId": "A", "format": 1, "rawSql": "SELECT sum(customer_charge_total_microunits) / 1000000 AS customer_charge FROM voicemesh.billing_calls_current WHERE $__timeFilter(finalized_at)"}],
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Gross Margin",
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "voicemesh-clickhouse-cloud"},
+      "fieldConfig": {"defaults": {"unit": "currencyUSD"}, "overrides": []},
+      "targets": [{"refId": "A", "format": 1, "rawSql": "SELECT sum(gross_margin_microunits) / 1000000 AS gross_margin FROM voicemesh.billing_calls_current WHERE $__timeFilter(finalized_at)"}],
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Gross Margin %",
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "voicemesh-clickhouse-cloud"},
+      "fieldConfig": {"defaults": {"unit": "percentunit"}, "overrides": []},
+      "targets": [{"refId": "A", "format": 1, "rawSql": "SELECT if(sum(customer_charge_total_microunits)=0, 0, sum(gross_margin_microunits) / sum(customer_charge_total_microunits)) AS gross_margin_pct FROM voicemesh.billing_calls_current WHERE $__timeFilter(finalized_at)"}],
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0}
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Cost Over Time",
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "voicemesh-clickhouse-cloud"},
+      "fieldConfig": {"defaults": {"unit": "currencyUSD"}, "overrides": []},
+      "targets": [{"refId": "A", "format": 0, "rawSql": "SELECT $__timeInterval(finalized_at) AS time, sum(provider_cost_total_microunits) / 1000000 AS provider_cost, sum(customer_charge_total_microunits) / 1000000 AS customer_charge, sum(gross_margin_microunits) / 1000000 AS gross_margin FROM voicemesh.billing_calls_current WHERE $__timeFilter(finalized_at) GROUP BY time ORDER BY time"}],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4}
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Cost By Component",
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "voicemesh-clickhouse-cloud"},
+      "targets": [{"refId": "A", "format": 1, "rawSql": "SELECT component, sum(provider_cost_microunits) / 1000000 AS provider_cost, sum(customer_charge_microunits) / 1000000 AS customer_charge, sum(customer_charge_microunits - provider_cost_microunits) / 1000000 AS gross_margin FROM voicemesh.billing_line_items_current WHERE $__timeFilter(created_at) GROUP BY component ORDER BY provider_cost DESC"}],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4}
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Provider / Model Cost",
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "voicemesh-clickhouse-cloud"},
+      "targets": [{"refId": "A", "format": 1, "rawSql": "SELECT provider, model, usage_type, sum(quantity) AS usage_quantity, sum(provider_cost_microunits) / 1000000 AS provider_cost, sum(customer_charge_microunits) / 1000000 AS customer_charge, sum(customer_charge_microunits - provider_cost_microunits) / 1000000 AS gross_margin, count() AS sample_count FROM voicemesh.billing_line_items_current WHERE $__timeFilter(created_at) GROUP BY provider, model, usage_type ORDER BY provider_cost DESC LIMIT 50"}],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12}
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Expensive Calls",
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "voicemesh-clickhouse-cloud"},
+      "targets": [{"refId": "A", "format": 1, "rawSql": "SELECT call_id, tenant_id, assistant_id, billable_seconds, billing_status, provider_cost_total_microunits / 1000000 AS provider_cost, customer_charge_total_microunits / 1000000 AS customer_charge, gross_margin_microunits / 1000000 AS gross_margin, stt_cost_microunits / 1000000 AS stt_cost, llm_cost_microunits / 1000000 AS llm_cost, tts_cost_microunits / 1000000 AS tts_cost, telephony_cost_microunits / 1000000 AS telephony_cost, pricing_version, trace_id FROM voicemesh.billing_calls_current WHERE $__timeFilter(finalized_at) ORDER BY provider_cost_total_microunits DESC LIMIT 50"}],
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 12}
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "tags": ["voicemesh", "billing", "clickhouse", "cdc"],
+  "time": {"from": "now-24h", "to": "now"},
+  "timezone": "browser",
+  "title": "VoiceMesh Cost & Unit Economics",
+  "uid": "voicemesh-cost-unit-economics",
+  "version": 1
+}

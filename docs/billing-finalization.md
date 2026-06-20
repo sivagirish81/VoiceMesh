@@ -63,3 +63,16 @@ workflow finalizes final_call_billing_records
 If usage arrives after `final_call_billing_records` already exists, the UsageWriter starts
 `BillingAdjustmentWorkflow`, which recomputes from `usage_records` and writes an immutable
 `billing_adjustments` row instead of mutating the original usage ledger.
+
+For historical billing analytics, PeerDB can replicate only the committed billing tables
+from Postgres into ClickHouse Cloud:
+
+```text
+call_usage_events
+billing_line_items
+final_call_billing_records
+billing_adjustments
+```
+
+The application does not dual-write authoritative billing rows to ClickHouse. Postgres
+remains the ledger; ClickHouse is an eventually consistent projection for Grafana.

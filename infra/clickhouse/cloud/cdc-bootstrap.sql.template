@@ -1,0 +1,225 @@
+-- VoiceMesh billing CDC bootstrap for ClickHouse Cloud.
+-- These tables are compatible with the local PeerDB billing mirror.
+
+CREATE DATABASE IF NOT EXISTS voicemesh_cdc;
+CREATE DATABASE IF NOT EXISTS voicemesh;
+
+CREATE TABLE IF NOT EXISTS voicemesh_cdc.call_usage_events
+(
+    id Int64,
+    event_id UUID,
+    tenant_id String,
+    assistant_id String,
+    call_id String,
+    turn_id String,
+    response_id String,
+    usage_type LowCardinality(String),
+    component LowCardinality(String),
+    provider LowCardinality(String),
+    model LowCardinality(String),
+    quantity Decimal(24, 8),
+    unit LowCardinality(String),
+    is_estimated Bool,
+    is_final Bool,
+    is_late Bool,
+    occurred_at DateTime64(6, 'UTC'),
+    trace_id String,
+    idempotency_key String,
+    metadata_json String,
+    cost_basis_json String,
+    created_at DateTime64(6, 'UTC')
+)
+ENGINE = ReplacingMergeTree(created_at)
+ORDER BY (tenant_id, call_id, event_id);
+
+CREATE TABLE IF NOT EXISTS voicemesh_cdc.billing_line_items
+(
+    line_item_id UUID,
+    usage_event_id UUID,
+    tenant_id String,
+    assistant_id String,
+    call_id String,
+    component LowCardinality(String),
+    usage_type LowCardinality(String),
+    quantity Decimal(24, 8),
+    unit LowCardinality(String),
+    provider LowCardinality(String),
+    model LowCardinality(String),
+    provider_cost_microunits Int64,
+    customer_charge_microunits Int64,
+    discount_microunits Int64,
+    credit_microunits Int64,
+    currency LowCardinality(String),
+    rate_card_id String,
+    pricing_version String,
+    contract_id String,
+    status LowCardinality(String),
+    is_estimated Bool,
+    created_at DateTime64(6, 'UTC'),
+    updated_at DateTime64(6, 'UTC'),
+    trace_id String,
+    idempotency_key String
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY (tenant_id, call_id, line_item_id);
+
+CREATE TABLE IF NOT EXISTS voicemesh_cdc.final_call_billing_records
+(
+    billing_record_id UUID,
+    call_id String,
+    tenant_id String,
+    assistant_id String,
+    started_at Nullable(DateTime64(6, 'UTC')),
+    ended_at Nullable(DateTime64(6, 'UTC')),
+    connected_seconds Int32,
+    billable_seconds Int32,
+    platform_cost_microunits Int64,
+    telephony_cost_microunits Int64,
+    stt_cost_microunits Int64,
+    llm_cost_microunits Int64,
+    tts_cost_microunits Int64,
+    tool_cost_microunits Int64,
+    analysis_cost_microunits Int64,
+    provider_cost_total_microunits Int64,
+    customer_charge_total_microunits Int64,
+    discount_total_microunits Int64,
+    credit_total_microunits Int64,
+    gross_margin_microunits Int64,
+    currency LowCardinality(String),
+    pricing_version String,
+    billing_status LowCardinality(String),
+    status LowCardinality(String),
+    expected_usage_components String,
+    received_usage_components String,
+    missing_usage_components String,
+    finalized_at Nullable(DateTime64(6, 'UTC')),
+    created_at DateTime64(6, 'UTC'),
+    updated_at DateTime64(6, 'UTC'),
+    version Int32,
+    trace_id String
+)
+ENGINE = ReplacingMergeTree(version)
+ORDER BY (tenant_id, call_id);
+
+CREATE TABLE IF NOT EXISTS voicemesh_cdc.billing_adjustments
+(
+    adjustment_id UUID,
+    original_line_item_id Nullable(UUID),
+    call_id String,
+    tenant_id String,
+    assistant_id String,
+    component LowCardinality(String),
+    reason_code LowCardinality(String),
+    provider_cost_delta_microunits Int64,
+    customer_charge_delta_microunits Int64,
+    currency LowCardinality(String),
+    pricing_version String,
+    previous_total_cost_cents Int32,
+    recomputed_total_cost_cents Int32,
+    delta_cost_cents Int32,
+    reason String,
+    source_event_id Nullable(UUID),
+    workflow_id String,
+    status LowCardinality(String),
+    trace_id String,
+    idempotency_key String,
+    created_at DateTime64(6, 'UTC')
+)
+ENGINE = ReplacingMergeTree(created_at)
+ORDER BY (tenant_id, call_id, adjustment_id);
+
+CREATE OR REPLACE VIEW voicemesh.billing_usage_current AS
+SELECT
+    event_id,
+    tenant_id,
+    assistant_id,
+    call_id,
+    turn_id,
+    component,
+    usage_type,
+    provider,
+    model,
+    quantity,
+    unit,
+    is_estimated,
+    is_final,
+    is_late,
+    occurred_at,
+    created_at,
+    trace_id
+FROM voicemesh_cdc.call_usage_events FINAL;
+
+CREATE OR REPLACE VIEW voicemesh.billing_line_items_current AS
+SELECT
+    line_item_id,
+    usage_event_id,
+    tenant_id,
+    assistant_id,
+    call_id,
+    component,
+    usage_type,
+    provider,
+    model,
+    quantity,
+    unit,
+    provider_cost_microunits,
+    customer_charge_microunits,
+    discount_microunits,
+    credit_microunits,
+    currency,
+    pricing_version,
+    status,
+    is_estimated,
+    created_at,
+    updated_at,
+    trace_id
+FROM voicemesh_cdc.billing_line_items FINAL;
+
+CREATE OR REPLACE VIEW voicemesh.billing_calls_current AS
+SELECT
+    call_id,
+    tenant_id,
+    assistant_id,
+    started_at,
+    ended_at,
+    billable_seconds,
+    platform_cost_microunits,
+    telephony_cost_microunits,
+    stt_cost_microunits,
+    llm_cost_microunits,
+    tts_cost_microunits,
+    tool_cost_microunits,
+    analysis_cost_microunits,
+    provider_cost_total_microunits,
+    customer_charge_total_microunits,
+    discount_total_microunits,
+    credit_total_microunits,
+    gross_margin_microunits,
+    currency,
+    pricing_version,
+    billing_status,
+    expected_usage_components,
+    received_usage_components,
+    missing_usage_components,
+    finalized_at,
+    updated_at,
+    version,
+    trace_id
+FROM voicemesh_cdc.final_call_billing_records FINAL;
+
+CREATE OR REPLACE VIEW voicemesh.billing_adjustments_current AS
+SELECT
+    adjustment_id,
+    original_line_item_id,
+    call_id,
+    tenant_id,
+    assistant_id,
+    component,
+    reason_code,
+    provider_cost_delta_microunits,
+    customer_charge_delta_microunits,
+    currency,
+    pricing_version,
+    created_at,
+    trace_id
+FROM voicemesh_cdc.billing_adjustments FINAL;

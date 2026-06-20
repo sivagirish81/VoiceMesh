@@ -80,6 +80,30 @@ The deterministic demo inserts events for a healthy call, slow TTS/backpressure,
 noise/barge-in handling, and provider failure. It does not store transcripts, raw
 audio, LLM tokens, TTS chunks, or VAD frames.
 
+## Billing CDC Demo
+
+This demo uses the authoritative billing path: Postgres first, then CDC to
+ClickHouse Cloud.
+
+```bash
+make up-cdc
+make peerdb-postgres-setup
+make clickhouse-cdc-bootstrap
+make peerdb-create-mirror
+make demo-billing-cdc
+```
+
+Expected evidence:
+
+- Postgres contains four deterministic billing records.
+- PeerDB mirrors only billing tables.
+- ClickHouse views under `voicemesh.billing_*_current` show the replicated rows.
+- Grafana dashboards `VoiceMesh Cost & Unit Economics` and
+  `VoiceMesh Billing Integrity & CDC Health` show cost and integrity panels.
+
+The demo never writes billing rows directly to ClickHouse. If PeerDB has not caught up,
+the script reports that CDC rows are not visible yet.
+
 ## Hot-Path Barge-In Demos
 
 These demos are browser-guided because the current POC transport is the dashboard
