@@ -61,8 +61,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         title="VoiceMesh",
         version="0.1.0",
         description=(
-            "A Vapi-inspired reliability lab based on public voice infrastructure challenges. "
-            "It does not claim to represent Vapi's internal architecture."
+            "A production-inspired reliability lab for real-time voice AI infrastructure."
         ),
         lifespan=lifespan,
     )

@@ -1,0 +1,60 @@
+-- VoiceMesh ClickHouse Cloud bootstrap template.
+-- Safe to run repeatedly. Replace placeholders only in your local shell/session,
+-- never in a committed file.
+
+CREATE DATABASE IF NOT EXISTS voicemesh;
+
+CREATE TABLE IF NOT EXISTS voicemesh.voice_events
+(
+    event_id String,
+    event_type LowCardinality(String),
+    event_version UInt16 DEFAULT 1,
+
+    event_time DateTime64(3, 'UTC'),
+    ingested_at DateTime64(3, 'UTC') DEFAULT now64(3),
+
+    tenant_id String,
+    assistant_id String,
+    call_id String,
+    turn_id String DEFAULT '',
+    response_id String DEFAULT '',
+
+    sequence UInt64 DEFAULT 0,
+
+    stage LowCardinality(String) DEFAULT '',
+    provider LowCardinality(String) DEFAULT '',
+    model LowCardinality(String) DEFAULT '',
+    status LowCardinality(String) DEFAULT '',
+    reason_code LowCardinality(String) DEFAULT '',
+
+    latency_ms Nullable(Float64),
+    duration_ms Nullable(Float64),
+    quantity Nullable(Float64),
+    unit LowCardinality(String) DEFAULT '',
+
+    trace_id String DEFAULT '',
+    idempotency_key String DEFAULT '',
+
+    payload_json String DEFAULT ''
+)
+ENGINE = ReplacingMergeTree(ingested_at)
+PARTITION BY toYYYYMM(event_time)
+ORDER BY
+(
+    tenant_id,
+    call_id,
+    event_time,
+    event_id
+)
+TTL event_time + INTERVAL 30 DAY DELETE;
+
+-- Optional user/role setup. ClickHouse Cloud permissions vary by account.
+-- If your current Cloud user cannot create users or roles, create equivalent
+-- writer/read-only users in the ClickHouse Cloud console and place their
+-- credentials in .env.
+--
+-- CREATE USER IF NOT EXISTS voicemesh_writer IDENTIFIED WITH sha256_password BY '<REPLACE_WITH_WRITER_PASSWORD>';
+-- GRANT INSERT, SELECT ON voicemesh.voice_events TO voicemesh_writer;
+--
+-- CREATE USER IF NOT EXISTS voicemesh_grafana IDENTIFIED WITH sha256_password BY '<REPLACE_WITH_GRAFANA_PASSWORD>';
+-- GRANT SELECT ON voicemesh.voice_events TO voicemesh_grafana;

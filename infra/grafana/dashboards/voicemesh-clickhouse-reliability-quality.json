@@ -1,0 +1,186 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "voicemesh-clickhouse-cloud"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "targets": [
+        {
+          "format": 1,
+          "rawSql": "SELECT uniqExactIf(call_id, event_type = 'call.failed') AS failed_calls, countIf(event_type = 'provider.failed') AS provider_errors, uniqExactIf(call_id, event_type = 'pipeline.corked') AS calls_affected_by_backpressure, countIf(event_type = 'pipeline.stale_chunk_dropped') AS stale_chunks_dropped, countIf(event_type = 'webhook.failed') AS webhook_failures FROM voice_events WHERE $__timeFilter(event_time)",
+          "refId": "A"
+        }
+      ],
+      "title": "Reliability Summary",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "voicemesh-clickhouse-cloud"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "id": 2,
+      "targets": [
+        {
+          "format": 0,
+          "rawSql": "SELECT $__timeInterval(event_time) AS time, stage, provider, reason_code, count() AS errors FROM voice_events WHERE $__timeFilter(event_time) AND event_type IN ('provider.failed','provider.timeout') GROUP BY time, stage, provider, reason_code ORDER BY time",
+          "refId": "A"
+        }
+      ],
+      "title": "Provider Errors And Timeouts",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "voicemesh-clickhouse-cloud"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "id": 3,
+      "targets": [
+        {
+          "format": 1,
+          "rawSql": "SELECT stage, countIf(event_type = 'pipeline.corked') AS cork_events, avgIf(duration_ms, event_type = 'pipeline.uncorked' AND duration_ms IS NOT NULL) AS avg_cork_duration_ms, quantileExactIf(0.95)(duration_ms, event_type = 'pipeline.uncorked' AND duration_ms IS NOT NULL) AS p95_cork_duration_ms, uniqExactIf(call_id, event_type = 'pipeline.corked') AS calls_with_cork_events, countIf(event_type = 'pipeline.stale_chunk_dropped') AS stale_chunks_dropped FROM voice_events WHERE $__timeFilter(event_time) GROUP BY stage HAVING cork_events > 0 OR stale_chunks_dropped > 0 ORDER BY cork_events DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Backpressure Analysis",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "voicemesh-clickhouse-cloud"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "id": 4,
+      "targets": [
+        {
+          "format": 1,
+          "rawSql": "SELECT countIf(event_type = 'user.barge_in_candidate') AS candidates, countIf(event_type = 'user.barge_in_confirmed') AS confirmed, countIf(event_type = 'user.barge_in_rejected') AS rejected, if(countIf(event_type = 'user.barge_in_candidate') = 0, 0, countIf(event_type = 'user.barge_in_confirmed') / countIf(event_type = 'user.barge_in_candidate')) AS confirmation_rate FROM voice_events WHERE $__timeFilter(event_time)",
+          "refId": "A"
+        }
+      ],
+      "title": "Barge-In Outcomes",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "voicemesh-clickhouse-cloud"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "id": 5,
+      "targets": [
+        {
+          "format": 1,
+          "rawSql": "SELECT reason_code, count() AS ignored_turns, uniqExact(call_id) AS affected_calls FROM voice_events WHERE $__timeFilter(event_time) AND event_type = 'vad.noise_turn_ignored' GROUP BY reason_code ORDER BY ignored_turns DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Noise-Like Turns Ignored",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "voicemesh-clickhouse-cloud"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "id": 6,
+      "targets": [
+        {
+          "format": 1,
+          "rawSql": "SELECT event_time, event_type, call_id, turn_id, response_id, stage, provider, status, reason_code, latency_ms, duration_ms, trace_id FROM voice_events WHERE $__timeFilter(event_time) ORDER BY event_time DESC, sequence DESC LIMIT 200",
+          "refId": "A"
+        }
+      ],
+      "title": "Recent Coarse Event Timeline",
+      "type": "table"
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "tags": [
+    "voicemesh",
+    "clickhouse"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "VoiceMesh Reliability & Interaction Quality",
+  "uid": "voicemesh-clickhouse-reliability-quality",
+  "version": 1
+}

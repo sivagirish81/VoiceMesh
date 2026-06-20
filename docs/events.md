@@ -54,6 +54,32 @@ VoiceMesh currently routes tool events to `tool-events`, webhook events to
 `webhook-events`, usage events to `usage-events`, and final billing events to
 `billing-events`.
 
+## ClickHouse Analytics Projection
+
+A dedicated consumer group, `voicemesh-clickhouse-analytics`, reads the same coarse
+Kafka topics and projects selected fields into ClickHouse Cloud table
+`voicemesh.voice_events`.
+
+The projection promotes stable fields into typed columns:
+
+- lifecycle identity: `tenant_id`, `assistant_id`, `call_id`, `turn_id`, `response_id`
+- event identity: `event_id`, `event_type`, `event_version`, `sequence`,
+  `idempotency_key`
+- analytics dimensions: `stage`, `provider`, `model`, `status`, `reason_code`
+- measurements: `latency_ms`, `duration_ms`, `quantity`, `unit`
+- correlation: `trace_id`
+- sanitized `payload_json`
+
+The normalizer redacts transcript, generated text, and audio-like payload fields before
+writing `payload_json`. ClickHouse should not receive raw audio, full transcripts,
+per-token events, TTS chunks, or VAD frames in this integration.
+
+Ingestion is at least once. Kafka offsets are committed only after ClickHouse accepts
+the batch. Duplicate delivery can happen if a process crashes after insert but before
+offset commit, so dashboards should count logical entities with `uniqExact(event_id)` or
+`uniqExact(call_id)` where appropriate. The raw table uses `ReplacingMergeTree`, but
+replacement is eventually consistent.
+
 Pipeline pressure events can be emitted when they are operationally meaningful, such as
 a prolonged cork, a threshold breach, or a turn failure. Routine queue oscillation is
 better represented as metrics.

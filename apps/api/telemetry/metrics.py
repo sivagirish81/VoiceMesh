@@ -258,3 +258,57 @@ WEBHOOK_DELIVERY_DURATION = Histogram(
     ["status"],
     buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30),
 )
+
+CLICKHOUSE_WRITER_UP = Gauge(
+    "voicemesh_clickhouse_writer_up",
+    "Whether the ClickHouse analytics writer is currently healthy",
+)
+CLICKHOUSE_INSERT_BATCHES_TOTAL = Counter(
+    "voicemesh_clickhouse_insert_batches_total",
+    "ClickHouse insert batches by outcome",
+    ["status"],
+)
+CLICKHOUSE_INSERT_ROWS_TOTAL = Counter(
+    "voicemesh_clickhouse_insert_rows_total",
+    "ClickHouse inserted analytics rows by outcome",
+    ["status"],
+)
+CLICKHOUSE_INSERT_FAILURES_TOTAL = Counter(
+    "voicemesh_clickhouse_insert_failures_total",
+    "ClickHouse insert failures by stable reason code",
+    ["reason_code"],
+)
+CLICKHOUSE_INSERT_LATENCY = Histogram(
+    "voicemesh_clickhouse_insert_latency_seconds",
+    "ClickHouse insert latency",
+    buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30),
+)
+CLICKHOUSE_BATCH_SIZE = Histogram(
+    "voicemesh_clickhouse_batch_size",
+    "ClickHouse analytics batch size",
+    buckets=(1, 5, 10, 25, 50, 100, 250, 500, 1000),
+)
+CLICKHOUSE_BUFFER_ROWS = Gauge(
+    "voicemesh_clickhouse_buffer_rows",
+    "Rows currently buffered by the ClickHouse analytics writer",
+)
+CLICKHOUSE_EVENTS_NORMALIZED_TOTAL = Counter(
+    "voicemesh_clickhouse_events_normalized_total",
+    "Kafka events normalized for ClickHouse",
+    ["event_type"],
+)
+CLICKHOUSE_EVENTS_REJECTED_TOTAL = Counter(
+    "voicemesh_clickhouse_events_rejected_total",
+    "Kafka events rejected by the ClickHouse normalizer",
+    ["reason_code"],
+)
+CLICKHOUSE_RETRY_TOTAL = Counter(
+    "voicemesh_clickhouse_retry_total",
+    "ClickHouse writer retries by stable reason code",
+    ["reason_code"],
+)
+CLICKHOUSE_CONSUMER_LAG = Gauge(
+    "voicemesh_clickhouse_consumer_lag",
+    "ClickHouse analytics consumer lag by topic and partition",
+    ["topic", "partition"],
+)
