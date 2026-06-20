@@ -54,6 +54,32 @@ docker compose exec -T postgres psql -U postgres -d voice_lab \
 Jaeger should show `temporal.activity.*` spans for activities. Kafka UI should show
 tool, billing, and workflow events on the relevant topics.
 
+## ClickHouse Cloud Analytics
+
+ClickHouse Cloud is optional. It projects coarse Kafka events into a historical
+analytics table and powers Grafana dashboards that answer cross-call questions.
+
+```bash
+make clickhouse-cloud-check
+make clickhouse-cloud-bootstrap
+make demo-clickhouse-cloud
+```
+
+For continuous ingestion from Kafka:
+
+```bash
+make clickhouse-consumer
+```
+
+Open Grafana at `http://localhost:3001` and look for:
+
+- `VoiceMesh Call Performance Analytics`
+- `VoiceMesh Reliability & Interaction Quality`
+
+The deterministic demo inserts events for a healthy call, slow TTS/backpressure,
+noise/barge-in handling, and provider failure. It does not store transcripts, raw
+audio, LLM tokens, TTS chunks, or VAD frames.
+
 ## Hot-Path Barge-In Demos
 
 These demos are browser-guided because the current POC transport is the dashboard

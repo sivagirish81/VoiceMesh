@@ -19,6 +19,7 @@ Postgres, OpenTelemetry, Jaeger, Prometheus, and Grafana.
 - Postgres idempotency and transactional outbox mechanics
 - Per-call provider usage metering and a finalized billing ledger
 - OpenTelemetry traces and Prometheus metrics
+- Optional ClickHouse Cloud analytics projection for historical cross-call dashboards
 - Provider latency/failure and database-outage injection
 - A Next.js dashboard with browser microphone and PCM playback
 
@@ -118,6 +119,13 @@ finalization, summary/evaluation pipelines, recording/transcript finalization, a
 long-running or state-changing tools. A one-step idempotent Kafka consumer may be
 simpler when durable workflow semantics are unnecessary.
 
+ClickHouse Cloud is optional historical analytics storage for coarse events. A
+dedicated Kafka consumer group batches events into `voicemesh.voice_events`, and
+Grafana can query that table for cross-call latency, reliability, backpressure,
+barge-in, and noise-handling trends. ClickHouse is outside the live media path; calls
+continue if the Cloud service, consumer, or dashboards are unavailable. See
+[docs/clickhouse-cloud.md](docs/clickhouse-cloud.md).
+
 See [docs/kafka_vs_temporal.md](docs/kafka_vs_temporal.md),
 [docs/events.md](docs/events.md), and
 [docs/postgres_reliability.md](docs/postgres_reliability.md).
@@ -205,6 +213,24 @@ make demo-durable-action-cancel
 make demo-billing-late-tts
 make demo-noise-vad
 ```
+
+### ClickHouse Cloud Analytics
+
+ClickHouse Cloud is not required for the normal local call demo. To enable historical
+analytics, add the `CLICKHOUSE_*` variables to `.env`, then run:
+
+```bash
+make clickhouse-cloud-check
+make clickhouse-cloud-bootstrap
+make clickhouse-consumer
+make demo-clickhouse-cloud
+```
+
+Grafana provisions two ClickHouse dashboards when the datasource credentials are
+available:
+
+- `VoiceMesh Call Performance Analytics`
+- `VoiceMesh Reliability & Interaction Quality`
 
 ### TTS Backpressure
 

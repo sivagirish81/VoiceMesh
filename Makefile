@@ -2,22 +2,25 @@ SHELL := /bin/bash
 PYTEST ?= .venv/bin/pytest
 RUFF ?= .venv/bin/ruff
 MYPY ?= .venv/bin/mypy
+PYTHON ?= .venv/bin/python
 
 .PHONY: up down restart logs api worker event-worker dashboard migrate create-topics \
 	demo-normal-call demo-tts-backpressure demo-db-down demo-duplicate-events \
 	demo-kill-worker demo-durable-action-cancel demo-billing-late-tts \
 	demo-full-call-refund-trace demo-noise-vad demo-barge-in-confirmed \
-	demo-barge-in-noise-rejected demo-barge-in-backchannel smoke-live-pipeline test lint
+	demo-barge-in-noise-rejected demo-barge-in-backchannel clickhouse-cloud-check \
+	clickhouse-cloud-bootstrap clickhouse-consumer demo-clickhouse-cloud test-clickhouse \
+	smoke-live-pipeline test lint
 
 up:
 	@test -f .env || (echo "Missing .env. Copy .env.example and set OPENAI_API_KEY." && exit 1)
-	docker compose up --build -d
+	docker compose --profile analytics up --build -d
 
 down:
-	docker compose down
+	docker compose --profile analytics down
 
 restart:
-	docker compose restart
+	docker compose --profile analytics restart
 
 logs:
 	docker compose logs -f --tail=200
@@ -30,6 +33,9 @@ worker:
 
 event-worker:
 	python -m apps.worker.event_worker
+
+clickhouse-consumer:
+	docker compose --profile analytics up --build clickhouse-worker
 
 dashboard:
 	cd apps/dashboard && npm run dev
@@ -75,6 +81,18 @@ demo-barge-in-noise-rejected:
 
 demo-barge-in-backchannel:
 	python scripts/demo_barge_in_backchannel.py
+
+clickhouse-cloud-check:
+	$(PYTHON) scripts/clickhouse_cloud_check.py
+
+clickhouse-cloud-bootstrap:
+	$(PYTHON) scripts/clickhouse_cloud_bootstrap.py
+
+demo-clickhouse-cloud:
+	$(PYTHON) scripts/demo_clickhouse_cloud.py
+
+test-clickhouse:
+	$(PYTEST) -q tests/test_clickhouse_config.py tests/test_clickhouse_normalizer.py tests/test_clickhouse_writer.py
 
 smoke-live-pipeline:
 	docker compose exec -T api python scripts/smoke_live_pipeline.py

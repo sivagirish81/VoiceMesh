@@ -125,19 +125,22 @@ Use labels such as `stage`, `provider`, `model`, `topic`, `consumer_group`,
 `transition`, and `reason_code`. Put high-cardinality identifiers in traces, logs,
 Kafka events, and Postgres projections instead.
 
-## Future ClickHouse Analytics
+## ClickHouse Analytics
 
-VoiceMesh does not have ClickHouse yet. When added, ClickHouse should back analytical
-dashboards that are not appropriate for Prometheus:
+ClickHouse Cloud is an optional historical analytics projection for coarse Kafka
+events. It complements the current observability stack:
 
-- call volume by tenant or assistant over long windows;
-- cost by provider, model, tenant, or customer;
-- historical usage trends across STT, LLM, and TTS providers;
-- full call event timelines and arbitrary event exploration;
-- transcript and tool analytics; and
-- historical failure analysis over months of events.
+- Prometheus: live service health, SLOs, short-term operational dashboards.
+- Jaeger: detailed trace for one call or workflow.
+- Postgres: transactional product state, idempotency, billing ledger.
+- ClickHouse Cloud: historical cross-call analytics over coarse events.
 
-Do not add those warehouse-style panels to the current Prometheus dashboards.
+The first ClickHouse dashboards focus on call performance, provider latency,
+backpressure, barge-in outcomes, noise-like turns ignored, and provider failures. They
+do not store raw audio, full transcripts, LLM tokens, TTS chunks, or VAD frames.
+
+Broader warehouse-style analytics remain future work: long-window tenant cost trends,
+transcript/tool analytics, and arbitrary event exploration across months of data.
 
 ## Local Tooling
 

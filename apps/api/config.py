@@ -41,6 +41,23 @@ class Settings(BaseSettings):
     kafka_consumer_batch_timeout_ms: int = Field(default=500, ge=1)
     event_worker_metrics_port: int = Field(default=9101, ge=1)
     temporal_worker_metrics_port: int = Field(default=9102, ge=1)
+    clickhouse_enabled: bool = False
+    clickhouse_host: str = ""
+    clickhouse_port: int = Field(default=8443, ge=1)
+    clickhouse_secure: bool = True
+    clickhouse_verify_tls: bool = True
+    clickhouse_database: str = "voicemesh"
+    clickhouse_writer_user: str = ""
+    clickhouse_writer_password: str = ""
+    clickhouse_grafana_user: str = ""
+    clickhouse_grafana_password: str = ""
+    clickhouse_connect_timeout_seconds: int = Field(default=10, ge=1)
+    clickhouse_send_receive_timeout_seconds: int = Field(default=30, ge=1)
+    clickhouse_batch_max_rows: int = Field(default=500, ge=1)
+    clickhouse_batch_flush_seconds: float = Field(default=1.0, gt=0)
+    clickhouse_max_retry_seconds: int = Field(default=30, ge=1)
+    clickhouse_retention_days: int = Field(default=30, ge=1)
+    clickhouse_worker_metrics_port: int = Field(default=9103, ge=1)
     durable_action_default_timeout_seconds: int = Field(default=3600, ge=1)
     webhook_max_attempts: int = Field(default=5, ge=1)
     webhook_backoff_seconds: int = Field(default=2, ge=0)
@@ -133,6 +150,21 @@ class Settings(BaseSettings):
             raise ValueError("BARGE_IN_BACKCHANNEL_POLICY must be low, medium, or high")
         if self.barge_in_interruption_sensitivity not in {"low", "medium", "high"}:
             raise ValueError("BARGE_IN_INTERRUPTION_SENSITIVITY must be low, medium, or high")
+        if self.clickhouse_enabled:
+            missing = [
+                name
+                for name, value in {
+                    "CLICKHOUSE_HOST": self.clickhouse_host,
+                    "CLICKHOUSE_WRITER_USER": self.clickhouse_writer_user,
+                    "CLICKHOUSE_WRITER_PASSWORD": self.clickhouse_writer_password,
+                }.items()
+                if not value
+            ]
+            if missing:
+                raise ValueError(
+                    "ClickHouse analytics is enabled but required settings are missing: "
+                    + ", ".join(missing)
+                )
         return self
 
     def validate_provider_credentials(self) -> None:

@@ -1,0 +1,184 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "voicemesh-clickhouse-cloud"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "format": 1,
+          "rawSql": "SELECT uniqExact(call_id) AS total_calls FROM voice_events WHERE $__timeFilter(event_time) AND event_type = 'call.started'",
+          "refId": "A"
+        }
+      ],
+      "title": "Total Calls",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "voicemesh-clickhouse-cloud"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "format": 1,
+          "rawSql": "SELECT if(uniqExactIf(call_id, event_type IN ('call.ended','call.failed')) = 0, 0, uniqExactIf(call_id, event_type = 'call.ended') / uniqExactIf(call_id, event_type IN ('call.ended','call.failed'))) AS success_rate FROM voice_events WHERE $__timeFilter(event_time)",
+          "refId": "A"
+        }
+      ],
+      "title": "Call Success Rate",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "voicemesh-clickhouse-cloud"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "id": 3,
+      "targets": [
+        {
+          "format": 0,
+          "rawSql": "SELECT $__timeInterval(event_time) AS time, stage, quantileExactIf(0.50)(latency_ms, latency_ms IS NOT NULL) AS p50_ms, quantileExactIf(0.95)(latency_ms, latency_ms IS NOT NULL) AS p95_ms FROM voice_events WHERE $__timeFilter(event_time) AND event_type IN ('stt.final_transcript','llm.first_token','tts.first_audio') GROUP BY time, stage ORDER BY time",
+          "refId": "A"
+        }
+      ],
+      "title": "Stage Latency p50/p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "voicemesh-clickhouse-cloud"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "id": 4,
+      "targets": [
+        {
+          "format": 1,
+          "rawSql": "SELECT stage, provider, model, countIf(latency_ms IS NOT NULL) AS samples, quantileExactIf(0.50)(latency_ms, latency_ms IS NOT NULL) AS p50_ms, quantileExactIf(0.95)(latency_ms, latency_ms IS NOT NULL) AS p95_ms, quantileExactIf(0.99)(latency_ms, latency_ms IS NOT NULL) AS p99_ms, countIf(event_type = 'provider.failed') AS errors FROM voice_events WHERE $__timeFilter(event_time) AND stage != '' GROUP BY stage, provider, model ORDER BY samples DESC LIMIT 50",
+          "refId": "A"
+        }
+      ],
+      "title": "Provider Latency Comparison",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "voicemesh-clickhouse-cloud"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 12
+      },
+      "id": 5,
+      "targets": [
+        {
+          "format": 1,
+          "rawSql": "WITH starts AS (SELECT call_id, any(assistant_id) AS assistant_id, min(event_time) AS start_time FROM voice_events WHERE $__timeFilter(event_time) AND event_type = 'call.started' GROUP BY call_id), ends AS (SELECT call_id, max(event_time) AS end_time, any(status) AS status FROM voice_events WHERE $__timeFilter(event_time) AND event_type IN ('call.ended','call.failed') GROUP BY call_id) SELECT starts.call_id, starts.assistant_id, starts.start_time, ends.end_time, ends.status, dateDiff('second', starts.start_time, ends.end_time) AS duration_seconds, countIf(e.event_type = 'user.barge_in_confirmed') AS barge_in_count, countIf(e.event_type = 'vad.noise_turn_ignored') AS noise_turn_count, countIf(e.event_type = 'pipeline.corked') AS cork_count, countIf(e.event_type = 'provider.failed') AS provider_error_count, anyIf(e.trace_id, e.trace_id != '') AS trace_id FROM starts LEFT JOIN ends USING call_id LEFT JOIN voice_events e ON e.call_id = starts.call_id GROUP BY starts.call_id, starts.assistant_id, starts.start_time, ends.end_time, ends.status ORDER BY starts.start_time DESC LIMIT 100",
+          "refId": "A"
+        }
+      ],
+      "title": "Recent Call Analytics",
+      "type": "table"
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "tags": [
+    "voicemesh",
+    "clickhouse"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "VoiceMesh Call Performance Analytics",
+  "uid": "voicemesh-clickhouse-call-performance",
+  "version": 1
+}

@@ -17,3 +17,7 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ["temporal-worker:9102"]
+  - job_name: voicemesh-clickhouse-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["clickhouse-worker:9103"]

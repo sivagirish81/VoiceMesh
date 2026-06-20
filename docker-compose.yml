@@ -155,6 +155,11 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: admin
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
+      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-}
+      CLICKHOUSE_PORT: ${CLICKHOUSE_PORT:-8443}
+      CLICKHOUSE_GRAFANA_USER: ${CLICKHOUSE_GRAFANA_USER:-}
+      CLICKHOUSE_GRAFANA_PASSWORD: ${CLICKHOUSE_GRAFANA_PASSWORD:-}
     volumes:
       - grafana-data:/var/lib/grafana
       - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
@@ -207,6 +212,21 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
+
+  clickhouse-worker:
+    profiles: ["analytics"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    <<: *app-env
+    command: ["python", "-m", "apps.worker.clickhouse_worker"]
+    expose:
+      - "9103"
+    depends_on:
       kafka-init:
         condition: service_completed_successfully
       otel-collector:

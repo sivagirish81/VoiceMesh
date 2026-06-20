@@ -1,8 +1,8 @@
 # Architecture
 
 VoiceMesh is a production-inspired reliability lab for real-time voice infrastructure.
-It is informed by public voice-platform problems, but it does not claim to describe
-Vapi's internal architecture.
+It explores public real-time voice platform problems without claiming to describe any
+company's internal architecture.
 
 The central design rule is that the live media path and the durable control plane have
 different latency and consistency requirements. The session worker handles the live
@@ -36,9 +36,11 @@ flowchart LR
     Kafka --> Writers["Postgres writers"]
     Kafka --> Billing["Billing consumers"]
     Kafka --> Analytics["Analytics / eval consumers"]
+    Kafka --> CHConsumer["ClickHouse analytics consumer"]
     Kafka --> WorkflowBridge["Temporal starter / signaler"]
 
     Writers --> Postgres["Postgres system of record"]
+    CHConsumer --> ClickHouse["ClickHouse Cloud analytics store"]
     WorkflowBridge --> Temporal["Temporal durable outer loop"]
     Temporal --> Activities["Activities"]
     Activities --> Postgres
@@ -51,6 +53,7 @@ flowchart LR
     OTel --> Jaeger["Jaeger"]
     OTel --> Prometheus["Prometheus"]
     Prometheus --> Grafana["Grafana"]
+    ClickHouse --> Grafana
 ```
 
 ## Runtime Ownership
@@ -107,6 +110,24 @@ Assistant configuration should be loaded at call start through a cache backed by
 Postgres. The live path should not wait for a Postgres write before invoking the next
 provider stage. Final transcripts, lifecycle events, and metrics should normally be
 persisted by asynchronous consumers or outbox workers.
+
+### ClickHouse Cloud
+
+ClickHouse Cloud is the historical analytics projection for coarse events. It is useful
+for cross-call questions such as provider latency trends, calls affected by corking,
+barge-in outcomes, noise-like turns ignored, and reliability comparisons over time.
+
+ClickHouse does not replace Postgres, Prometheus, or Jaeger:
+
+- Postgres remains the transactional system of record and billing ledger.
+- Prometheus remains the live operational metrics and alerting store.
+- Jaeger remains the detailed trace view for one call or workflow.
+- ClickHouse stores delayed, replayable analytics rows derived from Kafka.
+
+The analytics consumer has its own Kafka consumer group and commits offsets only after
+ClickHouse acknowledges a batch insert. If ClickHouse is unavailable, the consumer
+retries and dashboards become stale; active calls continue normally. See
+[clickhouse-cloud.md](clickhouse-cloud.md).
 
 ### Temporal
 

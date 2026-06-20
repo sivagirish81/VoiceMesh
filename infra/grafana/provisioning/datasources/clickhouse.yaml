@@ -1,0 +1,20 @@
+apiVersion: 1
+datasources:
+  - name: VoiceMesh ClickHouse Cloud
+    uid: voicemesh-clickhouse-cloud
+    type: grafana-clickhouse-datasource
+    access: proxy
+    jsonData:
+      host: ${CLICKHOUSE_HOST}
+      port: ${CLICKHOUSE_PORT}
+      protocol: http
+      secure: true
+      username: ${CLICKHOUSE_GRAFANA_USER}
+      defaultDatabase: voicemesh
+      defaultTable: voice_events
+      dialTimeout: 10
+      queryTimeout: 60
+      validateSql: true
+      tlsSkipVerify: false
+    secureJsonData:
+      password: ${CLICKHOUSE_GRAFANA_PASSWORD}
