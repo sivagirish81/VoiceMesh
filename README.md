@@ -1,15 +1,15 @@
 # VoiceMesh
 
 VoiceMesh is a production-inspired reliability lab for real-time voice AI
-infrastructure. This project is inspired by real-time voice infrastructure challenges
-and public role requirements. It does **not** claim to reproduce or describe Vapi's
-internal architecture.
+infrastructure. It explores latency, provider abstraction, backpressure, event
+streaming, durable workflow boundaries, billing, and observability in a local
+end-to-end system.
 
 The project provides a real local vertical slice: browser PCM input, VAD, OpenAI STT,
 streaming OpenAI LLM output, OpenAI TTS, browser playback, Apache Kafka, Temporal OSS,
 Postgres, OpenTelemetry, Jaeger, Prometheus, and Grafana.
 
-## What It Demonstrates
+## Capabilities
 
 - Real `VAD → STT → LLM → TTS → Transport` execution with WebRTC VAD endpointing
 - In-memory weighted queues with cork/uncork backpressure
@@ -72,7 +72,7 @@ interruption handling.
 
 The working implementation intentionally has several simpler boundaries:
 
-- Browser WebSocket is the demo transport adapter.
+- Browser WebSocket is the local transport adapter.
 - Browser microphone capture requests echo cancellation, noise suppression, and automatic
   gain control where supported.
 - VAD defaults to WebRTC VAD over normalized 16 kHz PCM, with an adaptive RMS/energy VAD
@@ -193,7 +193,7 @@ The browser sends signed 16-bit PCM chunks. Browser constraints are a best-effor
 defense; the backend still normalizes audio for WebRTC VAD and applies smoothed
 endpointing plus STT guardrails before the LLM sees a turn.
 
-## Reliability Demos
+## Reliability Scenarios
 
 ```bash
 make demo-normal-call
@@ -218,7 +218,7 @@ drains to the low watermark, and the session worker uncorks.
 The transport side uses the same pattern with playable audio duration:
 `tts_to_transport` tracks `queued_audio_ms` instead of raw chunk count.
 
-This proves in-memory backpressure. Kafka records the transitions for demo visibility;
+This proves in-memory backpressure. Kafka records the transitions for operator visibility;
 Temporal is not architecturally required for them.
 
 ### Duplicate Event Replay
@@ -236,7 +236,7 @@ consumer after bounded DB retries, and projects the event after Postgres returns
 ### Temporal Worker Crash
 
 `make demo-kill-worker` stops and restarts only the Temporal worker. Workflow history
-survives in Temporal server storage and pending work resumes. This demonstrates durable
+survives in Temporal server storage and pending work resumes. This exercises durable
 outer-loop recovery, not recovery of an active browser or provider media stream.
 
 ### Durable Action Cancel Race
@@ -268,8 +268,8 @@ billing starts `BillingAdjustmentWorkflow`.
 | `make dashboard` | Run Next.js locally |
 | `make migrate` | Reapply the idempotent SQL migration |
 | `make create-topics` | Create required Kafka topics |
-| `make demo-durable-action-cancel` | Demonstrate cancel-before-external-ID durable tool action |
-| `make demo-billing-late-tts` | Demonstrate billing workflow waiting for late TTS usage |
+| `make demo-durable-action-cancel` | Run cancel-before-external-ID durable tool action scenario |
+| `make demo-billing-late-tts` | Run billing workflow late-TTS-usage scenario |
 | `make smoke-live-pipeline` | Run a real OpenAI STT → LLM → TTS WebSocket smoke test |
 | `make test` | Run Python tests |
 | `make lint` | Run Ruff, mypy, and dashboard lint |
@@ -372,9 +372,8 @@ See [docs/otel_tracing.md](docs/otel_tracing.md).
 - [Webhook delivery](docs/webhook-delivery.md)
 - [OpenTelemetry](docs/otel_tracing.md)
 - [Multi-tenant scaling and webhooks](docs/scaling.md)
-- [Durable outer-loop demos](docs/demo.md)
+- [Durable outer-loop scenarios](docs/demo.md)
 - [Failure modes](docs/failure_modes.md)
-- [Three-minute demo](docs/demo_script.md)
 
 ## Known Limitations
 
@@ -389,7 +388,7 @@ See [docs/otel_tracing.md](docs/otel_tracing.md).
 - Kafka publishing is awaited by the session worker; a production runtime should use a
   bounded asynchronous publication buffer or local durable handoff.
 - The POC event envelope lacks tenant, assistant, response, and schema-version fields.
-- Temporal still has a legacy per-call lifecycle workflow for the worker-recovery demo;
+- Temporal still has a legacy per-call lifecycle workflow for the worker-recovery scenario;
   the production-inspired path uses Temporal for durable actions, billing
   finalization, webhook delivery, and call completion.
 - TTS token usage is estimated and should be replaced by provider-reported usage when
