@@ -53,6 +53,12 @@ type PlaybackCursor = {
   startedAt: number;
 };
 
+type ConversationMessage = {
+  id: string;
+  text: string;
+  status?: "streaming" | "final" | "interrupted";
+};
+
 const BARGE_IN_ECHO_SUPPRESSION_MS = 350;
 const BARGE_IN_BROWSER_RMS_THRESHOLD = 0.025;
 const BARGE_IN_BROWSER_STRONG_RMS_THRESHOLD = 0.055;
@@ -72,8 +78,8 @@ export default function DemoPage() {
   const [connected, setConnected] = useState(false);
   const [recording, setRecording] = useState(false);
   const [partialTranscript, setPartialTranscript] = useState("");
-  const [transcript, setTranscript] = useState("");
-  const [response, setResponse] = useState("");
+  const [transcriptTurns, setTranscriptTurns] = useState<ConversationMessage[]>([]);
+  const [responseTurns, setResponseTurns] = useState<ConversationMessage[]>([]);
   const [events, setEvents] = useState<PipelineEvent[]>([]);
   const [micDebug, setMicDebug] = useState<MicDebug>({});
   const [ignoredNoiseTurns, setIgnoredNoiseTurns] = useState(0);
@@ -290,8 +296,8 @@ export default function DemoPage() {
     callIdRef.current = id;
     setEvents([]);
     setPartialTranscript("");
-    setTranscript("");
-    setResponse("");
+    setTranscriptTurns([]);
+    setResponseTurns([]);
     setIgnoredNoiseTurns(0);
     setMicDebug({});
     setPipeline({stage: "transport", corked: false, queue_depths: {}});
@@ -353,12 +359,36 @@ export default function DemoPage() {
         setPartialTranscript((current) => current + data.delta);
       }
       if (data.type === "transcript.final") {
-        setTranscript(data.text);
+        const text = String(data.text ?? "").trim();
+        if (text) {
+          const id = String(data.turn_id || crypto.randomUUID());
+          setTranscriptTurns((current) => {
+            const existing = current.find((turn) => turn.id === id);
+            if (existing) {
+              return current.map((turn) => (
+                turn.id === id ? {...turn, text, status: "final"} : turn
+              ));
+            }
+            return [...current.slice(-19), {id, text, status: "final"}];
+          });
+        }
         setPartialTranscript("");
       }
       if (data.type === "llm.token") {
         if (!data.response_id || !cancelledResponses.current.has(data.response_id)) {
-          setResponse((current) => current + data.text);
+          const id = String(data.response_id || "response");
+          const token = String(data.text ?? "");
+          setResponseTurns((current) => {
+            const existing = current.find((turn) => turn.id === id);
+            if (existing) {
+              return current.map((turn) => (
+                turn.id === id
+                  ? {...turn, text: `${turn.text}${token}`, status: "streaming"}
+                  : turn
+              ));
+            }
+            return [...current.slice(-19), {id, text: token, status: "streaming"}];
+          });
         }
       }
       if (data.type === "audio.chunk") {
@@ -371,7 +401,12 @@ export default function DemoPage() {
         );
       }
       if (data.type === "pipeline.response_cancelled") {
-        if (data.response_id) cancelledResponses.current.add(data.response_id);
+        if (data.response_id) {
+          cancelledResponses.current.add(data.response_id);
+          setResponseTurns((current) => current.map((turn) => (
+            turn.id === data.response_id ? {...turn, status: "interrupted"} : turn
+          )));
+        }
         stopPlayback();
         activePlayback.current = null;
       }
@@ -484,14 +519,42 @@ export default function DemoPage() {
       </div>
       <div className="grid two">
         <div className="card">
-          <h3>Streaming transcript</h3>
-          <div className="transcript">
-            {partialTranscript || transcript || "Speak naturally; partial text appears before silence closes the turn."}
+          <h3>User transcript</h3>
+          <div className="conversation-card">
+            {transcriptTurns.length === 0 && !partialTranscript && (
+              <div className="conversation-empty">
+                Speak naturally; partial text appears before silence closes the turn.
+              </div>
+            )}
+            {transcriptTurns.map((turn) => (
+              <div className="bubble user" key={turn.id}>
+                <div className="bubble-label">User</div>
+                {turn.text}
+              </div>
+            ))}
+            {partialTranscript && (
+              <div className="bubble user streaming">
+                <div className="bubble-label">User live</div>
+                {partialTranscript}
+              </div>
+            )}
           </div>
         </div>
         <div className="card">
-          <h3>Streaming response</h3>
-          <div className="transcript response">{response || "The model response will stream here."}</div>
+          <h3>Assistant response</h3>
+          <div className="conversation-card response">
+            {responseTurns.length === 0 && (
+              <div className="conversation-empty">The model response will stream here.</div>
+            )}
+            {responseTurns.map((turn) => (
+              <div className={`bubble assistant ${turn.status ?? "final"}`} key={turn.id}>
+                <div className="bubble-label">
+                  Assistant{turn.status === "interrupted" ? " interrupted" : ""}
+                </div>
+                {turn.text || "…"}
+              </div>
+            ))}
+          </div>
         </div>
       </div>
       <PipelineState stage={pipeline.stage} corked={pipeline.corked} corkReason={pipeline.cork_reason} queueDepths={pipeline.queue_depths} />

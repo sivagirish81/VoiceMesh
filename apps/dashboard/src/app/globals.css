@@ -81,6 +81,51 @@ p { color: var(--muted); line-height: 1.65; }
 .event-name { color: var(--cyan); font-weight: 650; }
 .transcript { min-height: 100px; font-size: 18px; line-height: 1.55; }
 .response { color: #c9d8df; }
+.conversation-card {
+  min-height: 180px;
+  max-height: 360px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.conversation-empty {
+  color: var(--muted);
+  line-height: 1.55;
+}
+.bubble {
+  border: 1px solid rgba(143,169,183,.16);
+  border-radius: 12px;
+  padding: 12px 14px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: rgba(4,12,17,.42);
+}
+.bubble.user {
+  border-color: rgba(65,217,199,.24);
+  background: rgba(65,217,199,.08);
+}
+.bubble.assistant {
+  border-color: rgba(97,168,255,.22);
+  background: rgba(97,168,255,.07);
+  color: #c9d8df;
+}
+.bubble.streaming {
+  border-style: dashed;
+}
+.bubble.interrupted {
+  border-color: rgba(240,106,114,.34);
+  background: rgba(240,106,114,.08);
+}
+.bubble-label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 760;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  margin-bottom: 5px;
+}
 .controls { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .control { background: rgba(4,12,17,.45); border: 1px solid var(--line); border-radius: 9px; padding: 12px; }
 .control input { width: 100%; accent-color: var(--cyan); }
@@ -94,4 +139,3 @@ p { color: var(--muted); line-height: 1.65; }
   .shell { padding-inline: 18px; }
   .event { grid-template-columns: 1fr; }
 }
-
