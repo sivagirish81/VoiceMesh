@@ -1,10 +1,10 @@
 import type { Metadata } from "next";
-import Link from "next/link";
+import {WorkspaceNav} from "@/components/WorkspaceNav";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "VoiceMesh Reliability Lab",
-  description: "Production-inspired live voice pipeline reliability laboratory",
+  title: "VoiceMesh",
+  description: "Real-time voice AI reliability workspace",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
@@ -12,20 +12,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
     <html lang="en">
       <body>
         <main className="shell">
-          <nav className="nav">
-            <Link className="brand" href="/">
-              <span className="brand-mark" />
-              <span>VoiceMesh</span>
-            </Link>
-            <div className="nav-links">
-              <Link href="/demo">Live Demo</Link>
-              <Link href="/calls">Calls</Link>
-              <Link href="/metrics">Metrics</Link>
-              <Link href="/billing">Billing</Link>
-              <a href="http://localhost:8080" target="_blank">Temporal</a>
-              <a href="http://localhost:16686" target="_blank">Jaeger</a>
-            </div>
-          </nav>
+          <WorkspaceNav />
           {children}
         </main>
       </body>

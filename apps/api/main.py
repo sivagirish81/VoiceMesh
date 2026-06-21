@@ -8,13 +8,24 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.responses import Response
 
+from apps.api.auth import authenticate_websocket
 from apps.api.config import Settings, get_settings
 from apps.api.db.repository import PostgresRepository
 from apps.api.events.kafka_producer import KafkaEventProducer
 from apps.api.failure_injection.injector import FailureInjector
 from apps.api.pipeline.stream_module import StreamModule
 from apps.api.providers.provider_registry import ProviderRegistry
-from apps.api.routes import billing, calls, demo, health, metrics, mock_customer, tools
+from apps.api.routes import (
+    agents,
+    auth,
+    billing,
+    calls,
+    demo,
+    health,
+    metrics,
+    mock_customer,
+    tools,
+)
 from apps.api.telemetry.tracing import configure_tracing
 from apps.api.temporal_client import TemporalLifecycleClient
 from apps.api.websocket_transport import BrowserWebSocketTransport
@@ -45,6 +56,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         temporal = TemporalLifecycleClient(runtime_settings)
         try:
             await repository.connect()
+            await repository.ensure_platform_seed(runtime_settings)
             await producer.start()
             await temporal.connect()
             application.state.settings = runtime_settings
@@ -67,12 +79,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000"],
+        allow_origins=[
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://0.0.0.0:3000",
+        ],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
     application.include_router(health.router)
+    application.include_router(auth.router)
+    application.include_router(agents.router)
     application.include_router(calls.router)
     application.include_router(demo.router)
     application.include_router(metrics.router)
@@ -90,8 +108,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @application.websocket("/ws/calls/{call_id}")
     async def call_websocket(websocket: WebSocket, call_id: str) -> None:
+        default_agent = await application.state.repository.get_default_agent()
+        agent_snapshot = (
+            application.state.repository._agent_snapshot(default_agent)
+            if default_agent
+            else {}
+        )
         registry = ProviderRegistry(
-            application.state.settings, application.state.failure_injector
+            application.state.settings,
+            application.state.failure_injector,
+            agent_snapshot,
         )
         pipeline = StreamModule(
             call_id=call_id,
@@ -102,6 +128,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             tts=registry.tts(),
             producer=application.state.producer,
             temporal=application.state.temporal,
+            organization_id=agent_snapshot.get("organization_id"),
+            agent_id=agent_snapshot.get("id"),
+            agent_snapshot=agent_snapshot,
+        )
+        await pipeline.run()
+
+    @application.websocket("/ws/agents/{agent_id}/calls/{call_id}")
+    async def agent_call_websocket(
+        websocket: WebSocket, agent_id: str, call_id: str
+    ) -> None:
+        context = await authenticate_websocket(websocket)
+        if not context:
+            await websocket.close(code=1008)
+            return
+        agent = await application.state.repository.get_agent(
+            context.organization_id,
+            agent_id,
+        )
+        if not agent:
+            await websocket.close(code=1008)
+            return
+        agent_snapshot = application.state.repository._agent_snapshot(agent)
+        registry = ProviderRegistry(
+            application.state.settings,
+            application.state.failure_injector,
+            agent_snapshot,
+        )
+        pipeline = StreamModule(
+            call_id=call_id,
+            settings=application.state.settings,
+            transport=BrowserWebSocketTransport(websocket),
+            stt=registry.stt(),
+            llm=registry.llm(),
+            tts=registry.tts(),
+            producer=application.state.producer,
+            temporal=application.state.temporal,
+            organization_id=context.organization_id,
+            agent_id=agent_id,
+            agent_snapshot=agent_snapshot,
         )
         await pipeline.run()
 

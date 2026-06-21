@@ -28,6 +28,10 @@ class OpenAITTSProvider(TTSProvider):
         self._failure_injector = failure_injector
         self._usage = SpeechUsage("", 0, 0.0)
 
+    @property
+    def voice(self) -> str:
+        return self._voice
+
     async def synthesize(self, text: str) -> AsyncIterator[bytes]:
         span = tracer.start_span("provider.openai.tts.speech_stream", kind=SpanKind.CLIENT)
         started = time.perf_counter()

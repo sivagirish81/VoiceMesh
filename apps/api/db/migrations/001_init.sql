@@ -1,8 +1,71 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+CREATE TABLE IF NOT EXISTS organizations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS organization_memberships (
+    organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role TEXT NOT NULL DEFAULT 'member',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (organization_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS user_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_user_sessions_user_expires
+    ON user_sessions(user_id, expires_at);
+
+CREATE TABLE IF NOT EXISTS voice_agents (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    system_prompt TEXT NOT NULL,
+    context_prompt TEXT NOT NULL DEFAULT '',
+    first_message TEXT NOT NULL DEFAULT '',
+    stt_provider TEXT NOT NULL DEFAULT 'openai',
+    stt_model TEXT NOT NULL DEFAULT 'gpt-realtime-whisper',
+    llm_provider TEXT NOT NULL DEFAULT 'openai',
+    llm_model TEXT NOT NULL DEFAULT 'gpt-4.1-mini',
+    tts_provider TEXT NOT NULL DEFAULT 'openai',
+    tts_model TEXT NOT NULL DEFAULT 'gpt-4o-mini-tts',
+    tts_voice TEXT NOT NULL DEFAULT 'alloy',
+    tuning JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(organization_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_voice_agents_org_status
+    ON voice_agents(organization_id, status, created_at);
+
 CREATE TABLE IF NOT EXISTS calls (
     id BIGSERIAL PRIMARY KEY,
     call_id TEXT NOT NULL UNIQUE,
+    organization_id UUID REFERENCES organizations(id),
+    agent_id UUID REFERENCES voice_agents(id),
+    agent_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
     status TEXT NOT NULL,
     started_at TIMESTAMPTZ,
     ended_at TIMESTAMPTZ,
@@ -23,6 +86,11 @@ CREATE TABLE IF NOT EXISTS calls (
 ALTER TABLE calls ADD COLUMN IF NOT EXISTS selected_stt_model TEXT;
 ALTER TABLE calls ADD COLUMN IF NOT EXISTS selected_llm_model TEXT;
 ALTER TABLE calls ADD COLUMN IF NOT EXISTS selected_tts_model TEXT;
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS organization_id UUID REFERENCES organizations(id);
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS agent_id UUID REFERENCES voice_agents(id);
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS agent_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb;
+CREATE INDEX IF NOT EXISTS idx_calls_org_agent_created
+    ON calls(organization_id, agent_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS call_events (
     id BIGSERIAL PRIMARY KEY,

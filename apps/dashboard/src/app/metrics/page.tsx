@@ -1,21 +1,17 @@
 import {LatencyChart, StageMetric} from "@/components/LatencyChart";
-import {SERVER_API_URL} from "@/lib/api";
+import {serverFetchJson} from "@/lib/serverApi";
 
 async function getMetrics(): Promise<StageMetric[]> {
-  try {
-    const response = await fetch(`${SERVER_API_URL}/metrics/summary`, {cache: "no-store"});
-    if (!response.ok) return [];
-    const body = await response.json();
-    return body.stages.map((row: Record<string, string | number>) => ({
-      ...row,
-      p50: Number(row.p50),
-      p95: Number(row.p95),
-      p99: Number(row.p99),
-      samples: Number(row.samples),
-    }));
-  } catch {
-    return [];
-  }
+  const body = await serverFetchJson<{stages: Array<Record<string, string | number>>}>(
+    "/metrics/summary",
+  );
+  return body.stages.map((row) => ({
+    ...row,
+    p50: Number(row.p50),
+    p95: Number(row.p95),
+    p99: Number(row.p99),
+    samples: Number(row.samples),
+  })) as StageMetric[];
 }
 
 export default async function MetricsPage() {

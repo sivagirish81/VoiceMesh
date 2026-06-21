@@ -110,17 +110,39 @@ class OpenAILLMProvider(LLMProvider):
             )
 
     def _build_input(self, transcript: str, call_context: dict[str, Any]) -> list[dict[str, str]]:
+        agent = call_context.get("agent") or {}
+        default_system_prompt = (
+            "You are the voice assistant inside VoiceMesh. "
+            "Answer clearly and conversationally in two or three short sentences. "
+            "If interruption metadata is present, only treat the spoken prefix as "
+            "heard by the user; do not assume unplayed generated text was heard."
+        )
+        system_prompt = str(agent.get("system_prompt") or default_system_prompt)
         messages: list[dict[str, str]] = [
             {
                 "role": "system",
-                "content": (
-                    "You are the voice assistant inside VoiceMesh, a reliability lab. "
-                    "Answer clearly and conversationally in two or three short sentences. "
-                    "If interruption metadata is present, only treat the spoken prefix as "
-                    "heard by the user; do not assume unplayed generated text was heard."
-                ),
+                "content": system_prompt,
             }
         ]
+        context_prompt = str(agent.get("context_prompt") or "").strip()
+        if context_prompt:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": f"Agent context for this call:\n{context_prompt}",
+                }
+            )
+        first_message = str(agent.get("first_message") or "").strip()
+        if first_message:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "The configured first message for this agent is: "
+                        f"{first_message}"
+                    ),
+                }
+            )
         for item in call_context.get("messages") or []:
             role = item.get("role")
             if role not in {"user", "assistant"}:

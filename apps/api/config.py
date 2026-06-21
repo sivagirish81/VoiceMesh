@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     openai_llm_model: str = "gpt-4.1-mini"
     openai_tts_model: str = "gpt-4o-mini-tts"
     openai_tts_voice: str = "alloy"
+    voicemesh_admin_email: str = ""
+    voicemesh_admin_password: str = ""
+    voicemesh_default_org_name: str = "VoiceMesh Local"
+    session_cookie_name: str = "voicemesh_session"
+    session_ttl_hours: int = Field(default=168, ge=1)
 
     database_url: str = "postgresql://postgres:postgres@localhost:5432/voice_lab"
     database_pool_min_size: int = 2
