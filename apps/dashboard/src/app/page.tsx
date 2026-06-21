@@ -1,39 +1,51 @@
 import Link from "next/link";
+import {AuthMe, Call, VoiceAgent} from "@/lib/api";
+import {serverFetchJson} from "@/lib/serverApi";
 
-export default function Home() {
+export default async function Home() {
+  const [me, agents, calls] = await Promise.all([
+    serverFetchJson<AuthMe>("/auth/me"),
+    serverFetchJson<VoiceAgent[]>("/agents"),
+    serverFetchJson<Call[]>("/calls"),
+  ]);
+  const activeCalls = calls.filter((call) => !call.ended_at && call.status !== "CALL_COMPLETED");
+
   return (
-    <>
-      <section className="hero">
-        <div className="eyebrow">Real-time systems, under pressure</div>
-        <h1>A reliability lab for the voice pipeline between hello and heard.</h1>
+    <div className="stack">
+      <section className="hero compact">
+        <div className="eyebrow">{me.organization.name}</div>
+        <h1>Voice agent operations workspace</h1>
         <p>
-          VoiceMesh runs a real browser microphone through VAD, OpenAI transcription,
-          streaming generation, speech synthesis, and browser playback. Kafka, Temporal,
-          Postgres, and OpenTelemetry expose what happens when the happy path stops being happy.
+          Manage voice agents, test live calls, inspect per-agent call history,
+          and track billing/observability from one organization-scoped workspace.
         </p>
         <div className="actions">
-          <Link className="button primary" href="/demo">Start a live call</Link>
-          <Link className="button" href="/calls">Inspect recent calls</Link>
+          <Link className="button primary" href="/agents/new">Create agent</Link>
+          <Link className="button" href="/agents">View agents</Link>
         </div>
       </section>
-      <section className="grid three">
-        <div className="card">
-          <h3>Streaming plane</h3>
-          <div className="metric">Kafka</div>
-          <p>High-throughput pipeline and provider events with durable replay.</p>
+      <section className="grid four">
+        <div className="card"><h3>Agents</h3><div className="metric">{agents.length}</div></div>
+        <div className="card"><h3>Recent calls</h3><div className="metric">{calls.length}</div></div>
+        <div className="card"><h3>Active calls</h3><div className="metric">{activeCalls.length}</div></div>
+        <div className="card"><h3>Signed in as</h3><div className="metric small-text">{me.user.email}</div></div>
+      </section>
+      <section className="card">
+        <div className="row">
+          <h2>Recent voice agents</h2>
+          <Link className="button small" href="/agents">Manage</Link>
         </div>
-        <div className="card">
-          <h3>Lifecycle plane</h3>
-          <div className="metric">Temporal</div>
-          <p>Durable call state, timeouts, degradation, and worker-crash recovery.</p>
-        </div>
-        <div className="card">
-          <h3>Failure plane</h3>
-          <div className="metric">Visible</div>
-          <p>Corking, duplicates, provider latency, and database failures are first-class signals.</p>
+        <div className="grid three">
+          {agents.slice(0, 3).map((agent) => (
+            <Link className="agent-card" href={`/agents/${agent.id}`} key={agent.id}>
+              <div className="status idle">{agent.status}</div>
+              <h3>{agent.name}</h3>
+              <p>{agent.description || "No description yet."}</p>
+              <div className="mono muted">{agent.llm_model} / {agent.tts_voice}</div>
+            </Link>
+          ))}
         </div>
       </section>
-    </>
+    </div>
   );
 }
-

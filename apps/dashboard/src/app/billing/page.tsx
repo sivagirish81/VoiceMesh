@@ -1,5 +1,6 @@
 import Link from "next/link";
-import {BillingCall, SERVER_API_URL} from "@/lib/api";
+import {BillingCall} from "@/lib/api";
+import {serverFetchJson} from "@/lib/serverApi";
 
 type BillingSummary = {
   totals: {
@@ -29,15 +30,6 @@ type BillingSummary = {
   }>;
 };
 
-async function load<T>(path: string, fallback: T): Promise<T> {
-  try {
-    const response = await fetch(`${SERVER_API_URL}${path}`, {cache: "no-store"});
-    return response.ok ? response.json() : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
 function usd(value: string | number | undefined): string {
   return `$${Number(value ?? 0).toFixed(6)}`;
 }
@@ -48,8 +40,8 @@ function centsUsd(value: string | number | undefined): string {
 
 export default async function BillingPage() {
   const [summary, calls] = await Promise.all([
-    load<BillingSummary>("/billing/summary", {totals: {}, usage: []}),
-    load<BillingCall[]>("/billing/calls", []),
+    serverFetchJson<BillingSummary>("/billing/summary"),
+    serverFetchJson<BillingCall[]>("/billing/calls"),
   ]);
   const durationSeconds = Number(
     summary.totals.finalized_duration_seconds ?? summary.totals.duration_seconds ?? 0

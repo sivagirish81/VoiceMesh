@@ -73,7 +73,17 @@ function floatToInt16(input: Float32Array): ArrayBuffer {
   return output.buffer;
 }
 
-export default function DemoPage() {
+type CallConsoleProps = {
+  agentId?: string;
+  title?: string;
+  eyebrow?: string;
+};
+
+export function CallConsole({
+  agentId,
+  title = "Live reliability console",
+  eyebrow = "Browser microphone -> real providers -> browser audio",
+}: CallConsoleProps) {
   const [callId, setCallId] = useState("");
   const [connected, setConnected] = useState(false);
   const [recording, setRecording] = useState(false);
@@ -304,7 +314,10 @@ export default function DemoPage() {
     cancelledResponses.current.clear();
     activePlayback.current = null;
     lastCandidateByResponse.current.clear();
-    const socket = new WebSocket(`${WS_URL}/ws/calls/${id}`);
+    const socketUrl = agentId
+      ? `${WS_URL}/ws/agents/${agentId}/calls/${id}`
+      : `${WS_URL}/ws/calls/${id}`;
+    const socket = new WebSocket(socketUrl);
     websocket.current = socket;
     socket.onopen = async () => {
       if (websocket.current !== socket) return;
@@ -473,8 +486,8 @@ export default function DemoPage() {
     <div className="stack">
       <section className="row" style={{alignItems: "flex-end"}}>
         <div>
-          <div className="eyebrow">Browser microphone → real providers → browser audio</div>
-          <h1 style={{fontSize: 46, marginBottom: 8}}>Live reliability console</h1>
+          <div className="eyebrow">{eyebrow}</div>
+          <h1 style={{fontSize: 46, marginBottom: 8}}>{title}</h1>
           <div className="mono muted">call_id: {callId || "not started"}</div>
         </div>
         <div className="actions">
@@ -561,5 +574,14 @@ export default function DemoPage() {
       <DemoControls callId={callId} />
       <EventFeed events={events} />
     </div>
+  );
+}
+
+export default function DemoPage() {
+  return (
+    <CallConsole
+      title="Compatibility call console"
+      eyebrow="Default seeded agent -> real providers -> browser audio"
+    />
   );
 }

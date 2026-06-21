@@ -228,13 +228,18 @@ class EventProjector:
         if event.event_type == EventType.CALL_STARTED:
             providers = event.payload.get("providers", {})
             models = event.payload.get("models", {})
+            agent = event.payload.get("agent", {})
             await connection.execute(
                 """
                 INSERT INTO calls (
                     call_id, status, started_at, current_stage,
                     selected_stt_provider, selected_llm_provider, selected_tts_provider,
-                    selected_stt_model, selected_llm_model, selected_tts_model
-                ) VALUES ($1, 'CALL_STARTED', $2, $3, $4, $5, $6, $7, $8, $9)
+                    selected_stt_model, selected_llm_model, selected_tts_model,
+                    organization_id, agent_id, agent_snapshot
+                ) VALUES (
+                    $1, 'CALL_STARTED', $2, $3, $4, $5, $6, $7, $8, $9,
+                    $10, $11, $12::jsonb
+                )
                 ON CONFLICT (call_id) DO UPDATE SET
                     status='CALL_STARTED',
                     started_at=COALESCE(calls.started_at, EXCLUDED.started_at),
@@ -244,6 +249,12 @@ class EventProjector:
                     selected_stt_model=EXCLUDED.selected_stt_model,
                     selected_llm_model=EXCLUDED.selected_llm_model,
                     selected_tts_model=EXCLUDED.selected_tts_model,
+                    organization_id=COALESCE(calls.organization_id, EXCLUDED.organization_id),
+                    agent_id=COALESCE(calls.agent_id, EXCLUDED.agent_id),
+                    agent_snapshot=CASE
+                        WHEN calls.agent_snapshot = '{}'::jsonb THEN EXCLUDED.agent_snapshot
+                        ELSE calls.agent_snapshot
+                    END,
                     updated_at=NOW()
                 """,
                 event.call_id,
@@ -255,6 +266,9 @@ class EventProjector:
                 models.get("stt"),
                 models.get("llm"),
                 models.get("tts"),
+                event.payload.get("tenant_id"),
+                event.payload.get("assistant_id"),
+                json.dumps(agent),
             )
         elif event.event_type == EventType.CALL_ENDED:
             result = await connection.execute(

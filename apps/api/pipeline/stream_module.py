@@ -136,8 +136,14 @@ class StreamModule:
         tts: TTSProvider,
         producer: KafkaEventProducer,
         temporal: TemporalLifecycleClient,
+        organization_id: str | None = None,
+        agent_id: str | None = None,
+        agent_snapshot: dict[str, Any] | None = None,
     ) -> None:
         self.call_id = call_id
+        self.organization_id = organization_id or "local-demo-tenant"
+        self.agent_id = agent_id or "local-demo-assistant"
+        self.agent_snapshot = agent_snapshot or {}
         self.settings = settings
         self.transport = transport
         self.stt = stt
@@ -208,6 +214,8 @@ class StreamModule:
                 stt_model=self.stt.model,
                 llm_model=self.llm.model,
                 tts_model=self.tts.model,
+                organization_id=self.organization_id,
+                agent_id=self.agent_id,
             )
             try:
                 self._stt_session = await self.stt.open_stream(self._on_stt_delta)
@@ -225,6 +233,10 @@ class StreamModule:
                             "stt": self.stt.model,
                             "llm": self.llm.model,
                             "tts": self.tts.model,
+                        },
+                        "agent": {
+                            "id": self.agent_id,
+                            "name": self.agent_snapshot.get("name"),
                         },
                     },
                 )
@@ -848,8 +860,18 @@ class StreamModule:
         return semantic
 
     def _llm_context(self, semantic: BargeInSemantic | None) -> dict[str, Any]:
+        agent_snapshot = getattr(self, "agent_snapshot", {})
         return {
             "call_id": self.call_id,
+            "organization_id": getattr(self, "organization_id", "local-demo-tenant"),
+            "agent_id": getattr(self, "agent_id", "local-demo-assistant"),
+            "agent": {
+                "id": getattr(self, "agent_id", "local-demo-assistant"),
+                "name": agent_snapshot.get("name"),
+                "system_prompt": agent_snapshot.get("system_prompt"),
+                "context_prompt": agent_snapshot.get("context_prompt"),
+                "first_message": agent_snapshot.get("first_message"),
+            },
             "messages": self._conversation[-10:],
             "barge_in": {
                 "semantic": semantic.value if semantic else None,
@@ -1541,8 +1563,8 @@ class StreamModule:
             if expected_usage
         ]
         return {
-            "tenant_id": "local-demo-tenant",
-            "assistant_id": "local-demo-assistant",
+            "tenant_id": getattr(self, "organization_id", "local-demo-tenant"),
+            "assistant_id": getattr(self, "agent_id", "local-demo-assistant"),
             "pricing_version": self.settings.billing_pricing_version,
             "expected_turns": expected_turns,
         }
@@ -1579,13 +1601,18 @@ class StreamModule:
         payload: dict[str, Any] | None = None,
     ) -> PipelineEvent:
         self.state.sequence_number += 1
+        enriched_payload = {
+            "tenant_id": getattr(self, "organization_id", "local-demo-tenant"),
+            "assistant_id": getattr(self, "agent_id", "local-demo-assistant"),
+            **(payload or {}),
+        }
         event = PipelineEvent.create(
             call_id=self.call_id,
             turn_id=turn_id or self.state.turn_id,
             event_type=event_type,
             stage=stage,
             sequence_number=self.state.sequence_number,
-            payload=payload,
+            payload=enriched_payload,
             trace_id=current_trace_id(),
         )
         await self.producer.publish(event)
