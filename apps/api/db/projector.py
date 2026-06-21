@@ -414,12 +414,25 @@ class EventProjector:
             )
             normalized_type = self._normalized_usage_type(usage_type, event.stage)
             usage_event_id = uuid5(NAMESPACE_URL, f"voicemesh:usage:{event.event_id}:{usage_type}")
+            component = self._stage_for_usage_type(normalized_type)
+            metadata = {
+                key: value
+                for key, value in event.payload.items()
+                if key not in {"provider", "model", "measurements"}
+            }
+            trace_id = event.trace_id
+            is_estimated = bool(measurement.get("estimated", False))
             await connection.execute(
                 """
                 INSERT INTO call_usage_events (
-                    event_id, tenant_id, assistant_id, call_id, turn_id, usage_type,
-                    provider, model, quantity, unit, cost_basis_json, created_at
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12)
+                    event_id, tenant_id, assistant_id, call_id, turn_id, response_id,
+                    usage_type, component, provider, model, quantity, unit, is_estimated,
+                    is_final, is_late, occurred_at, trace_id, idempotency_key,
+                    metadata_json, cost_basis_json, created_at
+                ) VALUES (
+                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
+                    TRUE,FALSE,$14,$15,$16,$17::jsonb,$18::jsonb,$19
+                )
                 ON CONFLICT (event_id) DO NOTHING
                 """,
                 usage_event_id,
@@ -427,11 +440,18 @@ class EventProjector:
                 str(event.payload.get("assistant_id", "local-demo-assistant")),
                 event.call_id,
                 event.turn_id,
+                str(event.payload.get("response_id", "")),
                 normalized_type,
+                component,
                 provider,
                 model,
                 quantity,
                 price["unit"],
+                is_estimated,
+                event.timestamp,
+                trace_id,
+                event.idempotency_key,
+                json.dumps(metadata),
                 json.dumps(
                     {
                         "source_usage_type": usage_type,
@@ -441,6 +461,20 @@ class EventProjector:
                     }
                 ),
                 event.timestamp,
+            )
+            await self._insert_billing_line_item(
+                connection,
+                event=event,
+                usage_event_id=usage_event_id,
+                component=component,
+                usage_type=normalized_type,
+                provider=provider,
+                model=model,
+                quantity=quantity,
+                unit=price["unit"],
+                cost_usd=cost,
+                pricing_version=price["pricing_version"],
+                is_estimated=is_estimated,
             )
             await self._update_usage_rollup(
                 connection,
@@ -455,6 +489,61 @@ class EventProjector:
             connection, event.call_id, duration_seconds=None, finalized=False
         )
         await self._enqueue_billing_event(connection, event, billing)
+
+    async def _insert_billing_line_item(
+        self,
+        connection: asyncpg.Connection,
+        *,
+        event: PipelineEvent,
+        usage_event_id: object,
+        component: str,
+        usage_type: str,
+        provider: str,
+        model: str,
+        quantity: Decimal,
+        unit: str,
+        cost_usd: Decimal,
+        pricing_version: str,
+        is_estimated: bool,
+    ) -> None:
+        line_item_id = uuid5(
+            NAMESPACE_URL,
+            f"voicemesh:billing-line-item:{usage_event_id}:{usage_type}",
+        )
+        microunits = int((cost_usd * Decimal("1000000")).to_integral_value())
+        await connection.execute(
+            """
+            INSERT INTO billing_line_items (
+                line_item_id, usage_event_id, tenant_id, assistant_id, call_id,
+                component, usage_type, quantity, unit, provider, model,
+                provider_cost_microunits, customer_charge_microunits,
+                currency, pricing_version, status, is_estimated, trace_id,
+                idempotency_key, created_at, updated_at
+            ) VALUES (
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
+                'USD',$14,'ACCEPTED',$15,$16,$17,$18,$18
+            )
+            ON CONFLICT (usage_event_id, usage_type) DO NOTHING
+            """,
+            line_item_id,
+            usage_event_id,
+            str(event.payload.get("tenant_id", "local-demo-tenant")),
+            str(event.payload.get("assistant_id", "local-demo-assistant")),
+            event.call_id,
+            component,
+            usage_type,
+            quantity,
+            unit,
+            provider,
+            model,
+            microunits,
+            microunits,
+            pricing_version,
+            is_estimated,
+            event.trace_id,
+            f"billing-line-item:{usage_event_id}:{usage_type}",
+            event.timestamp,
+        )
 
     async def _project_usage_manifest(
         self,

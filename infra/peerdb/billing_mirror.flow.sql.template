@@ -1,0 +1,33 @@
+-- PeerDB Flow SQL template for VoiceMesh billing CDC.
+-- Render with scripts/peerdb_render_flow_sql.py and apply through the PeerDB UI/CLI.
+-- Credentials must come from .env and must not be committed.
+
+CREATE PEER IF NOT EXISTS {{PEERDB_SOURCE_PEER_NAME}} FROM POSTGRES WITH (
+    host = '{{PEERDB_POSTGRES_HOST}}',
+    port = {{PEERDB_POSTGRES_PORT}},
+    user = '{{PEERDB_POSTGRES_USER}}',
+    password = '{{PEERDB_POSTGRES_PASSWORD}}',
+    database = '{{PEERDB_POSTGRES_DATABASE}}'
+);
+
+CREATE PEER IF NOT EXISTS {{PEERDB_DESTINATION_PEER_NAME}} FROM CLICKHOUSE WITH (
+    host = '{{CLICKHOUSE_HOST}}',
+    port = {{CLICKHOUSE_CDC_PORT}},
+    user = '{{CLICKHOUSE_CDC_USER}}',
+    password = '{{CLICKHOUSE_CDC_PASSWORD}}',
+    database = 'voicemesh_cdc',
+    secure = true
+);
+
+CREATE MIRROR IF NOT EXISTS {{PEERDB_MIRROR_NAME}}
+FROM {{PEERDB_SOURCE_PEER_NAME}} TO {{PEERDB_DESTINATION_PEER_NAME}}
+WITH TABLE MAPPING (
+    public.call_usage_events:voicemesh_cdc.call_usage_events,
+    public.billing_line_items:voicemesh_cdc.billing_line_items,
+    public.final_call_billing_records:voicemesh_cdc.final_call_billing_records,
+    public.billing_adjustments:voicemesh_cdc.billing_adjustments
+)
+WITH (
+    publication_name = 'voicemesh_billing_publication',
+    do_initial_copy = true
+);

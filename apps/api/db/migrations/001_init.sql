@@ -180,16 +180,65 @@ CREATE TABLE IF NOT EXISTS call_usage_events (
     assistant_id TEXT NOT NULL,
     call_id TEXT NOT NULL,
     turn_id TEXT NOT NULL,
+    response_id TEXT NOT NULL DEFAULT '',
     usage_type TEXT NOT NULL,
+    component TEXT NOT NULL DEFAULT 'unknown',
     provider TEXT NOT NULL,
     model TEXT NOT NULL,
     quantity NUMERIC(24, 8) NOT NULL,
     unit TEXT NOT NULL,
+    is_estimated BOOLEAN NOT NULL DEFAULT FALSE,
+    is_final BOOLEAN NOT NULL DEFAULT TRUE,
+    is_late BOOLEAN NOT NULL DEFAULT FALSE,
+    occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    trace_id TEXT,
+    idempotency_key TEXT,
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
     cost_basis_json JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE call_usage_events ADD COLUMN IF NOT EXISTS response_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE call_usage_events ADD COLUMN IF NOT EXISTS component TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE call_usage_events ADD COLUMN IF NOT EXISTS is_estimated BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE call_usage_events ADD COLUMN IF NOT EXISTS is_final BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE call_usage_events ADD COLUMN IF NOT EXISTS is_late BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE call_usage_events ADD COLUMN IF NOT EXISTS occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE call_usage_events ADD COLUMN IF NOT EXISTS trace_id TEXT;
+ALTER TABLE call_usage_events ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+ALTER TABLE call_usage_events ADD COLUMN IF NOT EXISTS metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb;
 CREATE INDEX IF NOT EXISTS idx_call_usage_events_call
     ON call_usage_events(call_id, created_at);
+
+CREATE TABLE IF NOT EXISTS billing_line_items (
+    line_item_id UUID PRIMARY KEY,
+    usage_event_id UUID NOT NULL,
+    tenant_id TEXT NOT NULL,
+    assistant_id TEXT NOT NULL,
+    call_id TEXT NOT NULL,
+    component TEXT NOT NULL,
+    usage_type TEXT NOT NULL,
+    quantity NUMERIC(24, 8) NOT NULL,
+    unit TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    provider_cost_microunits BIGINT NOT NULL DEFAULT 0,
+    customer_charge_microunits BIGINT NOT NULL DEFAULT 0,
+    discount_microunits BIGINT NOT NULL DEFAULT 0,
+    credit_microunits BIGINT NOT NULL DEFAULT 0,
+    currency TEXT NOT NULL DEFAULT 'USD',
+    rate_card_id TEXT,
+    pricing_version TEXT NOT NULL,
+    contract_id TEXT,
+    status TEXT NOT NULL DEFAULT 'ACCEPTED',
+    is_estimated BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    trace_id TEXT,
+    idempotency_key TEXT NOT NULL,
+    UNIQUE(usage_event_id, usage_type)
+);
+CREATE INDEX IF NOT EXISTS idx_billing_line_items_call
+    ON billing_line_items(call_id, created_at);
 
 CREATE TABLE IF NOT EXISTS call_usage_rollups (
     call_id TEXT PRIMARY KEY,
@@ -243,32 +292,79 @@ CREATE TABLE IF NOT EXISTS projection_watermarks (
 );
 
 CREATE TABLE IF NOT EXISTS final_call_billing_records (
+    billing_record_id UUID NOT NULL DEFAULT gen_random_uuid(),
     call_id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
     assistant_id TEXT NOT NULL,
     started_at TIMESTAMPTZ,
     ended_at TIMESTAMPTZ,
+    connected_seconds INTEGER NOT NULL DEFAULT 0,
     billable_seconds INTEGER NOT NULL DEFAULT 0,
     platform_cost_cents INTEGER NOT NULL DEFAULT 0,
+    platform_cost_microunits BIGINT NOT NULL DEFAULT 0,
     stt_cost_cents INTEGER NOT NULL DEFAULT 0,
+    stt_cost_microunits BIGINT NOT NULL DEFAULT 0,
     llm_cost_cents INTEGER NOT NULL DEFAULT 0,
+    llm_cost_microunits BIGINT NOT NULL DEFAULT 0,
     tts_cost_cents INTEGER NOT NULL DEFAULT 0,
+    tts_cost_microunits BIGINT NOT NULL DEFAULT 0,
     telephony_cost_cents INTEGER NOT NULL DEFAULT 0,
+    telephony_cost_microunits BIGINT NOT NULL DEFAULT 0,
+    tool_cost_microunits BIGINT NOT NULL DEFAULT 0,
+    analysis_cost_microunits BIGINT NOT NULL DEFAULT 0,
+    provider_cost_total_microunits BIGINT NOT NULL DEFAULT 0,
+    customer_charge_total_microunits BIGINT NOT NULL DEFAULT 0,
+    discount_total_microunits BIGINT NOT NULL DEFAULT 0,
+    credit_total_microunits BIGINT NOT NULL DEFAULT 0,
+    gross_margin_microunits BIGINT NOT NULL DEFAULT 0,
     total_cost_cents INTEGER NOT NULL DEFAULT 0,
     currency TEXT NOT NULL DEFAULT 'USD',
     pricing_version TEXT NOT NULL,
     status TEXT NOT NULL,
+    billing_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+    expected_usage_components JSONB NOT NULL DEFAULT '[]'::jsonb,
+    received_usage_components JSONB NOT NULL DEFAULT '[]'::jsonb,
+    missing_usage_components JSONB NOT NULL DEFAULT '[]'::jsonb,
     warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
     finalized_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    version INTEGER NOT NULL DEFAULT 1,
+    trace_id TEXT
 );
+ALTER TABLE final_call_billing_records ADD COLUMN IF NOT EXISTS billing_record_id UUID NOT NULL DEFAULT gen_random_uuid();
+ALTER TABLE final_call_billing_records ADD COLUMN IF NOT EXISTS connected_seconds INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE final_call_billing_records ADD COLUMN IF NOT EXISTS platform_cost_microunits BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE final_call_billing_records ADD COLUMN IF NOT EXISTS stt_cost_microunits BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE final_call_billing_records ADD COLUMN IF NOT EXISTS llm_cost_microunits BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE final_call_billing_records ADD COLUMN IF NOT EXISTS tts_cost_microunits BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE final_call_billing_records ADD COLUMN IF NOT EXISTS telephony_cost_microunits BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE final_call_billing_records ADD COLUMN IF NOT EXISTS tool_cost_microunits BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE final_call_billing_records ADD COLUMN IF NOT EXISTS analysis_cost_microunits BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE final_call_billing_records ADD COLUMN IF NOT EXISTS provider_cost_total_microunits BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE final_call_billing_records ADD COLUMN IF NOT EXISTS customer_charge_total_microunits BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE final_call_billing_records ADD COLUMN IF NOT EXISTS discount_total_microunits BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE final_call_billing_records ADD COLUMN IF NOT EXISTS credit_total_microunits BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE final_call_billing_records ADD COLUMN IF NOT EXISTS gross_margin_microunits BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE final_call_billing_records ADD COLUMN IF NOT EXISTS billing_status TEXT NOT NULL DEFAULT 'UNKNOWN';
+ALTER TABLE final_call_billing_records ADD COLUMN IF NOT EXISTS expected_usage_components JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE final_call_billing_records ADD COLUMN IF NOT EXISTS received_usage_components JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE final_call_billing_records ADD COLUMN IF NOT EXISTS missing_usage_components JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE final_call_billing_records ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE final_call_billing_records ADD COLUMN IF NOT EXISTS trace_id TEXT;
 
 CREATE TABLE IF NOT EXISTS billing_adjustments (
     adjustment_id UUID PRIMARY KEY,
+    original_line_item_id UUID,
     call_id TEXT NOT NULL,
     tenant_id TEXT NOT NULL,
     assistant_id TEXT NOT NULL,
+    component TEXT NOT NULL DEFAULT 'billing',
+    reason_code TEXT NOT NULL DEFAULT 'late_usage_after_finalization',
+    provider_cost_delta_microunits BIGINT NOT NULL DEFAULT 0,
+    customer_charge_delta_microunits BIGINT NOT NULL DEFAULT 0,
+    currency TEXT NOT NULL DEFAULT 'USD',
+    pricing_version TEXT,
     previous_total_cost_cents INTEGER NOT NULL,
     recomputed_total_cost_cents INTEGER NOT NULL,
     delta_cost_cents INTEGER NOT NULL,
@@ -276,9 +372,20 @@ CREATE TABLE IF NOT EXISTS billing_adjustments (
     source_event_id UUID,
     workflow_id TEXT,
     status TEXT NOT NULL DEFAULT 'CREATED',
+    trace_id TEXT,
+    idempotency_key TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(call_id, source_event_id)
 );
+ALTER TABLE billing_adjustments ADD COLUMN IF NOT EXISTS original_line_item_id UUID;
+ALTER TABLE billing_adjustments ADD COLUMN IF NOT EXISTS component TEXT NOT NULL DEFAULT 'billing';
+ALTER TABLE billing_adjustments ADD COLUMN IF NOT EXISTS reason_code TEXT NOT NULL DEFAULT 'late_usage_after_finalization';
+ALTER TABLE billing_adjustments ADD COLUMN IF NOT EXISTS provider_cost_delta_microunits BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE billing_adjustments ADD COLUMN IF NOT EXISTS customer_charge_delta_microunits BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE billing_adjustments ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'USD';
+ALTER TABLE billing_adjustments ADD COLUMN IF NOT EXISTS pricing_version TEXT;
+ALTER TABLE billing_adjustments ADD COLUMN IF NOT EXISTS trace_id TEXT;
+ALTER TABLE billing_adjustments ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
 
 CREATE TABLE IF NOT EXISTS webhook_deliveries (
     webhook_delivery_id TEXT PRIMARY KEY,

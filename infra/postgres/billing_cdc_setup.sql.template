@@ -1,0 +1,28 @@
+-- Local VoiceMesh billing CDC setup for PeerDB.
+-- Run through scripts/peerdb_postgres_setup.py so the password is supplied from .env.
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'voicemesh_peerdb') THEN
+        CREATE ROLE voicemesh_peerdb WITH LOGIN REPLICATION PASSWORD :'peerdb_password';
+    ELSE
+        ALTER ROLE voicemesh_peerdb WITH LOGIN REPLICATION PASSWORD :'peerdb_password';
+    END IF;
+END
+$$;
+
+GRANT CONNECT ON DATABASE voice_lab TO voicemesh_peerdb;
+GRANT USAGE ON SCHEMA public TO voicemesh_peerdb;
+GRANT SELECT ON TABLE
+    public.call_usage_events,
+    public.billing_line_items,
+    public.final_call_billing_records,
+    public.billing_adjustments
+TO voicemesh_peerdb;
+
+CREATE PUBLICATION voicemesh_billing_publication
+FOR TABLE
+    public.call_usage_events,
+    public.billing_line_items,
+    public.final_call_billing_records,
+    public.billing_adjustments;

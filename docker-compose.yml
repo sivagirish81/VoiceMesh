@@ -13,6 +13,16 @@ x-app-env: &app-env
 services:
   postgres:
     image: postgres:16-alpine
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_replication_slots=10"
+      - "-c"
+      - "max_wal_senders=10"
+      - "-c"
+      - "max_slot_wal_keep_size=1GB"
     environment:
       POSTGRES_DB: voice_lab
       POSTGRES_USER: postgres

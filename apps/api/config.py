@@ -58,6 +58,17 @@ class Settings(BaseSettings):
     clickhouse_max_retry_seconds: int = Field(default=30, ge=1)
     clickhouse_retention_days: int = Field(default=30, ge=1)
     clickhouse_worker_metrics_port: int = Field(default=9103, ge=1)
+    peerdb_enabled: bool = False
+    peerdb_mirror_name: str = "voicemesh_billing_cdc"
+    peerdb_source_peer_name: str = "voicemesh_postgres"
+    peerdb_destination_peer_name: str = "voicemesh_clickhouse"
+    peerdb_postgres_host: str = "postgres"
+    peerdb_postgres_port: int = Field(default=5432, ge=1)
+    peerdb_postgres_database: str = "voice_lab"
+    peerdb_postgres_user: str = "voicemesh_peerdb"
+    peerdb_postgres_password: str = ""
+    clickhouse_cdc_user: str = "voicemesh_cdc"
+    clickhouse_cdc_password: str = ""
     durable_action_default_timeout_seconds: int = Field(default=3600, ge=1)
     webhook_max_attempts: int = Field(default=5, ge=1)
     webhook_backoff_seconds: int = Field(default=2, ge=0)
@@ -165,6 +176,10 @@ class Settings(BaseSettings):
                     "ClickHouse analytics is enabled but required settings are missing: "
                     + ", ".join(missing)
                 )
+        if self.peerdb_enabled and not self.peerdb_postgres_password:
+            raise ValueError("PEERDB_POSTGRES_PASSWORD is required when PeerDB CDC is enabled")
+        if self.peerdb_enabled and not self.clickhouse_cdc_password:
+            raise ValueError("CLICKHOUSE_CDC_PASSWORD is required when PeerDB CDC is enabled")
         return self
 
     def validate_provider_credentials(self) -> None:

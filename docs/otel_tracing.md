@@ -139,6 +139,10 @@ The first ClickHouse dashboards focus on call performance, provider latency,
 backpressure, barge-in outcomes, noise-like turns ignored, and provider failures. They
 do not store raw audio, full transcripts, LLM tokens, TTS chunks, or VAD frames.
 
+Billing dashboards can use a separate PeerDB CDC projection from committed Postgres
+billing tables. That path is authoritative only because Postgres committed the rows
+first; ClickHouse remains analytical and eventually consistent.
+
 Broader warehouse-style analytics remain future work: long-window tenant cost trends,
 transcript/tool analytics, and arbitrary event exploration across months of data.
 

@@ -1,0 +1,72 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "panels": [
+    {
+      "id": 1,
+      "type": "table",
+      "title": "Billing State Summary",
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "voicemesh-clickhouse-cloud"},
+      "targets": [{"refId": "A", "format": 1, "rawSql": "SELECT billing_status, count() AS calls FROM voicemesh.billing_calls_current WHERE $__timeFilter(finalized_at) GROUP BY billing_status ORDER BY calls DESC"}],
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 0}
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Missing Usage Components",
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "voicemesh-clickhouse-cloud"},
+      "targets": [{"refId": "A", "format": 1, "rawSql": "SELECT missing_usage_components, count() AS calls FROM voicemesh.billing_calls_current WHERE $__timeFilter(finalized_at) AND length(missing_usage_components) > 2 GROUP BY missing_usage_components ORDER BY calls DESC"}],
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 0}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Age Of Latest Replicated Billing Update",
+      "description": "Best-effort freshness based on the latest replicated updated_at timestamp. This is not an exact PeerDB mirror lag metric.",
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "voicemesh-clickhouse-cloud"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "targets": [{"refId": "A", "format": 1, "rawSql": "SELECT dateDiff('second', max(updated_at), now()) AS replicated_update_age_seconds FROM voicemesh.billing_calls_current"}],
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 0}
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Late Usage Events",
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "voicemesh-clickhouse-cloud"},
+      "targets": [{"refId": "A", "format": 0, "rawSql": "SELECT $__timeInterval(created_at) AS time, component, countIf(is_late) AS late_usage_events FROM voicemesh.billing_usage_current WHERE $__timeFilter(created_at) GROUP BY time, component ORDER BY time"}],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6}
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Billing Adjustments",
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "voicemesh-clickhouse-cloud"},
+      "targets": [{"refId": "A", "format": 1, "rawSql": "SELECT reason_code, component, count() AS adjustments, sum(customer_charge_delta_microunits) / 1000000 AS adjustment_amount FROM voicemesh.billing_adjustments_current WHERE $__timeFilter(created_at) GROUP BY reason_code, component ORDER BY adjustments DESC"}],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6}
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Potential Billing Leakage Signals",
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "voicemesh-clickhouse-cloud"},
+      "targets": [{"refId": "A", "format": 1, "rawSql": "SELECT 'provider cost with zero customer charge' AS signal, countIf(provider_cost_total_microunits > 0 AND customer_charge_total_microunits = 0) AS calls FROM voicemesh.billing_calls_current WHERE $__timeFilter(finalized_at) UNION ALL SELECT 'negative-margin calls', countIf(gross_margin_microunits < 0) FROM voicemesh.billing_calls_current WHERE $__timeFilter(finalized_at) UNION ALL SELECT 'estimated usage unresolved', countIf(is_estimated) FROM voicemesh.billing_line_items_current WHERE $__timeFilter(created_at)"}],
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 14}
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Recent Billing Issues",
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "voicemesh-clickhouse-cloud"},
+      "targets": [{"refId": "A", "format": 1, "rawSql": "SELECT call_id, tenant_id, assistant_id, billing_status, missing_usage_components, provider_cost_total_microunits / 1000000 AS provider_cost, customer_charge_total_microunits / 1000000 AS customer_charge, gross_margin_microunits / 1000000 AS gross_margin, pricing_version, updated_at, trace_id FROM voicemesh.billing_calls_current WHERE $__timeFilter(updated_at) AND (length(missing_usage_components) > 2 OR gross_margin_microunits < 0 OR billing_status != 'FINALIZED') ORDER BY updated_at DESC LIMIT 100"}],
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 14}
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "tags": ["voicemesh", "billing", "cdc"],
+  "time": {"from": "now-24h", "to": "now"},
+  "timezone": "browser",
+  "title": "VoiceMesh Billing Integrity & CDC Health",
+  "uid": "voicemesh-billing-integrity-cdc-health",
+  "version": 1
+}
