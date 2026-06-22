@@ -1,10 +1,13 @@
 # ClickHouse Cloud Analytics
 
 VoiceMesh can project coarse Kafka events into ClickHouse Cloud for historical,
-cross-call analytics. This is an analytics side path only:
+cross-call analytics. Production deployments can also use Postgres CDC for
+billing-facing analytics that must match committed ledger state. Both are analytics
+side paths only:
 
 ```text
 Session Worker -> Kafka -> ClickHouse Analytics Consumer -> ClickHouse Cloud -> Grafana
+Postgres billing ledger -> CDC -> ClickHouse Cloud -> Grafana / BI
 ```
 
 The live media path remains:
@@ -17,6 +20,9 @@ ClickHouse is not used for VAD, barge-in, provider calls, queue backpressure,
 billing correctness, webhook delivery, or Temporal workflow execution. If
 ClickHouse Cloud is unavailable, calls continue and Kafka retains events for the
 analytics consumer to retry later.
+
+Postgres remains the billing source of truth. ClickHouse is where the team asks
+cross-call and cross-tenant analytical questions over replicated facts.
 
 ## What ClickHouse Stores
 
@@ -35,6 +41,12 @@ It intentionally does not store raw audio, full transcripts, every LLM token,
 every TTS chunk, every VAD frame, or trace spans. Jaeger remains the right tool
 for a single-call trace. Prometheus remains the right tool for live operational
 metrics.
+
+For billing analytics, CDC can replicate selected Postgres tables such as
+`usage_records`, `call_usage_manifests`, `call_usage_expectations`,
+`final_call_billing_records`, `billing_adjustments`, tenant dimensions, and pricing
+versions. PeerDB or ClickHouse ClickPipes for Postgres are good fits when the target is
+ClickHouse Cloud.
 
 ## Manual Cloud Setup
 

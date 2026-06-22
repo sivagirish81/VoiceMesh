@@ -26,41 +26,18 @@ Postgres, OpenTelemetry, Jaeger, Prometheus, and Grafana.
 ## Architecture
 
 The production-oriented design keeps the live media path in one per-call session
-worker. Kafka, Postgres, and Temporal are adjacent systems, not handoff stages between
-STT, LLM, and TTS.
+worker. Kafka, Postgres, ClickHouse, and Temporal are adjacent systems, not handoff
+stages between STT, LLM, and TTS.
 
-```mermaid
-flowchart LR
-    Client["Browser / WebRTC / SIP / telephony"] --> Gateway["Transport gateway"]
-
-    subgraph Hot["Per-call session worker"]
-      Session["Session state"]
-      VAD["VAD"]
-      STT["Streaming STT adapter"]
-      Turn["Turn finalizer"]
-      LLM["Streaming LLM adapter"]
-      Buffer["Sentence / phrase buffer"]
-      TTS["Streaming TTS adapter"]
-      Transport["Transport adapter"]
-      Session --> VAD --> STT --> Turn --> LLM --> Buffer --> TTS --> Transport
-    end
-
-    Gateway --> Session
-    Transport --> Gateway
-    Session -. "coarse events" .-> Kafka["Apache Kafka"]
-    Kafka --> Writers["Postgres writers"]
-    Kafka --> Billing["Billing / analytics / evals"]
-    Kafka --> Bridge["Temporal starter / signaler"]
-    Writers --> Postgres["Postgres"]
-    Bridge --> Temporal["Temporal outer loop"]
-    Temporal --> Activities["Post-call, tools, webhooks"]
-```
+![VoiceMesh architecture](docs/assets/architecture.svg)
 
 The session worker owns the transport connection, active provider streams, call and
 turn IDs, response-fenced text/audio queues, phrase buffering, cancellation, and
 barge-in state. Kafka provides coarse durable events and fanout. Postgres is the system of
-record. Temporal is optional for post-call and retry-heavy workflows; it is not part of
-normal streaming or cork/uncork.
+record. ClickHouse stores historical analytics projections. Temporal is used
+for durable workflows such as call completion, billing finalization,
+webhook delivery, and long-running tool actions; it is not part of normal streaming or
+cork/uncork.
 
 Read [docs/architecture.md](docs/architecture.md) for the full model,
 [docs/runtime_boundaries.md](docs/runtime_boundaries.md) for turn fencing, cancellation,
@@ -93,16 +70,18 @@ The working implementation intentionally has several simpler boundaries:
   into Postgres outside the live provider chain.
 - Billing uses measured STT audio duration, provider-reported LLM tokens, estimated TTS
   tokens, and a configurable per-minute platform fee.
-- A Temporal workflow still starts per call for the recovery lab, but routine
-  cork/uncork is no longer signaled to it.
+- Temporal coordinates durable action, call completion, webhook delivery, and billing
+  finalization workflows.
 - Barge-in uses a browser-side speculative candidate, backend VAD confirmation,
   response fencing, browser stale-audio rejection, and post-STT semantic resolution.
   Exact browser playback resume after a rejected candidate and provider-native request
   abort remain production hardening work.
 
-These are documented current behaviors, not the recommended production architecture.
-The next production-oriented step is tighter browser/provider cancellation and moving
-Temporal entirely to lifecycle work that genuinely requires durable workflow semantics.
+The production direction is the same architectural split at larger scale: keep active
+audio, provider streams, response fences, and backpressure inside the session worker;
+publish coarse facts to Kafka; project durable state into Postgres; push analytical and
+billing data into ClickHouse through event consumers or CDC; and run Temporal workflows
+for durable business processes.
 
 ## Kafka, Postgres, And Temporal
 
@@ -114,20 +93,20 @@ Postgres stores tenant and assistant configuration, call metadata, final transcr
 summaries, tool/webhook state, billing records, idempotency keys, and outbox rows. It
 should not block the transition from STT to LLM or LLM to TTS.
 
-Temporal is justified for post-call finalization, webhook retries, billing
+Temporal owns durable business workflows: call completion, webhook retries, billing
 finalization, summary/evaluation pipelines, recording/transcript finalization, and
-long-running or state-changing tools. A one-step idempotent Kafka consumer may be
-simpler when durable workflow semantics are unnecessary.
+long-running or state-changing tools. Workflow state, timers, retries, and audit history
+belong there.
 
-ClickHouse Cloud is optional historical analytics storage for coarse events. A
-dedicated Kafka consumer group batches events into `voicemesh.voice_events`, and
-Grafana can query that table for cross-call latency, reliability, backpressure,
-barge-in, and noise-handling trends. ClickHouse is outside the live media path; calls
-continue if the Cloud service, consumer, or dashboards are unavailable. See
+ClickHouse Cloud is an optional historical analytics store for coarse events and
+billing-facing analytical projections. A dedicated Kafka consumer group can batch
+events into `voicemesh.voice_events`, while production billing analytics can also use
+CDC from Postgres into ClickHouse for immutable ledger, manifest, adjustment, and
+invoice-facing tables. ClickHouse is outside the live media path; calls continue if the
+Cloud service, consumer, or dashboards are unavailable. See
 [docs/clickhouse-cloud.md](docs/clickhouse-cloud.md).
 
-See [docs/kafka_vs_temporal.md](docs/kafka_vs_temporal.md),
-[docs/events.md](docs/events.md), and
+See [docs/events.md](docs/events.md), [docs/temporal-workflows.md](docs/temporal-workflows.md), and
 [docs/postgres_reliability.md](docs/postgres_reliability.md).
 
 ## Billing
@@ -145,8 +124,12 @@ estimated from synthesized text and PCM duration because the current Speech API
 response does not expose token usage; the dashboard labels those rows as estimated.
 
 Open [http://localhost:3000/billing](http://localhost:3000/billing) for totals,
-per-model usage, and the per-call ledger. Pricing is a dated local snapshot for this
-lab, not an invoice from OpenAI. See [docs/billing.md](docs/billing.md).
+per-model usage, and the per-call ledger. `BillingFinalizationWorkflow` waits for the
+call usage manifest, the Kafka projection watermark, and expected per-turn usage before
+writing `final_call_billing_records`; late usage creates immutable adjustments instead
+of mutating the original finalized ledger. Pricing is a dated local snapshot for this
+lab, not an invoice from OpenAI. See [docs/billing.md](docs/billing.md) and
+[docs/temporal-workflows.md](docs/temporal-workflows.md).
 
 ## Provider Adapters
 
@@ -201,29 +184,15 @@ The browser sends signed 16-bit PCM chunks. Browser constraints are a best-effor
 defense; the backend still normalizes audio for WebRTC VAD and applies smoothed
 endpointing plus STT guardrails before the LLM sees a turn.
 
-## Reliability Scenarios
+## ClickHouse Cloud Analytics
 
-```bash
-make demo-normal-call
-make demo-tts-backpressure
-make demo-duplicate-events
-make demo-db-down
-make demo-kill-worker
-make demo-durable-action-cancel
-make demo-billing-late-tts
-make demo-noise-vad
-```
-
-### ClickHouse Cloud Analytics
-
-ClickHouse Cloud is not required for the normal local call demo. To enable historical
+ClickHouse Cloud is optional. To enable historical
 analytics, add the `CLICKHOUSE_*` variables to `.env`, then run:
 
 ```bash
 make clickhouse-cloud-check
 make clickhouse-cloud-bootstrap
 make clickhouse-consumer
-make demo-clickhouse-cloud
 ```
 
 Grafana provisions two ClickHouse dashboards when the datasource credentials are
@@ -231,54 +200,6 @@ available:
 
 - `VoiceMesh Call Performance Analytics`
 - `VoiceMesh Reliability & Interaction Quality`
-
-### TTS Backpressure
-
-`make demo-tts-backpressure` requires no microphone. It creates spoken test input with
-OpenAI, sends it through the normal WebSocket path, and injects 400 ms delay per TTS
-output chunk. The `llm_to_tts` queue accumulates estimated future speech duration
-(`queued_speak_ahead_ms`). At the high watermark the session worker corks upstream LLM
-phrase production. After the delay is removed, TTS catches up, the speak-ahead budget
-drains to the low watermark, and the session worker uncorks.
-
-The transport side uses the same pattern with playable audio duration:
-`tts_to_transport` tracks `queued_audio_ms` instead of raw chunk count.
-
-This proves in-memory backpressure. Kafka records the transitions for operator visibility;
-Temporal is not architecturally required for them.
-
-### Duplicate Event Replay
-
-`make demo-duplicate-events` replays a persisted event with its original idempotency
-key. Postgres uniqueness prevents a second persisted state transition and VoiceMesh
-publishes `duplicate_event.ignored`.
-
-### Postgres Down
-
-`make demo-db-down` pauses Postgres for 15 seconds. The live path and Kafka remain
-available. The `event-worker` does not commit the failed Kafka offset, recreates its
-consumer after bounded DB retries, and projects the event after Postgres returns.
-
-### Temporal Worker Crash
-
-`make demo-kill-worker` stops and restarts only the Temporal worker. Workflow history
-survives in Temporal server storage and pending work resumes. This exercises durable
-outer-loop recovery, not recovery of an active browser or provider media stream.
-
-### Durable Action Cancel Race
-
-`make demo-durable-action-cancel` starts a `DurableActionWorkflow` for a mock refund
-request. The mock create API intentionally sleeps; the script sends `CancelRequested`
-before the external `refund_request_id` exists. When create returns `rr_001`, the
-workflow immediately calls the cancel endpoint and persists `CANCELLED`.
-
-### Billing Waits For Late TTS Usage
-
-`make demo-billing-late-tts` publishes call/usage events through Kafka. The event worker
-writes usage and the finalization barrier to Postgres, advances the projection watermark,
-and sends one coalesced `UsageProjectionUpdated` hint. The workflow waits for manifest,
-watermark, and expected turn usage before finalizing. Usage that appears after final
-billing starts `BillingAdjustmentWorkflow`.
 
 ## Commands
 
@@ -294,8 +215,6 @@ billing starts `BillingAdjustmentWorkflow`.
 | `make dashboard` | Run Next.js locally |
 | `make migrate` | Reapply the idempotent SQL migration |
 | `make create-topics` | Create required Kafka topics |
-| `make demo-durable-action-cancel` | Run cancel-before-external-ID durable tool action scenario |
-| `make demo-billing-late-tts` | Run billing workflow late-TTS-usage scenario |
 | `make smoke-live-pipeline` | Run a real OpenAI STT → LLM → TTS WebSocket smoke test |
 | `make test` | Run Python tests |
 | `make lint` | Run Ruff, mypy, and dashboard lint |
@@ -373,10 +292,10 @@ Prometheus scrapes the API plus the event worker and Temporal worker metrics end
 Prometheus labels avoid high-cardinality identifiers such as `call_id`; use Jaeger,
 Kafka events, and Postgres rows for per-call debugging.
 
-ClickHouse is **not** part of the current stack. Future ClickHouse-backed dashboards may
-cover long-range tenant usage, provider cost analysis, historical call timelines,
-transcript/tool analytics, and arbitrary event exploration. Those warehouse-style
-queries are deliberately deferred.
+ClickHouse Cloud can be enabled as the historical analytics path for long-range tenant
+usage, provider cost analysis, historical call timelines, transcript/tool analytics,
+and arbitrary event exploration. Prometheus remains the live metrics path; ClickHouse is
+for replayable, cross-call warehouse-style queries.
 
 See [docs/otel_tracing.md](docs/otel_tracing.md).
 
@@ -388,17 +307,15 @@ See [docs/otel_tracing.md](docs/otel_tracing.md).
 - [Barge-in handling](docs/barge-in.md)
 - [VAD and endpointing](docs/vad-and-endpointing.md)
 - [Event contracts](docs/events.md)
-- [Kafka versus Temporal](docs/kafka_vs_temporal.md)
 - [Temporal workflows](docs/temporal-workflows.md)
 - [Durable action tools](docs/durable-action-tools.md)
 - [Provider adapters](docs/provider_abstractions.md)
 - [Postgres reliability](docs/postgres_reliability.md)
 - [Billing pipeline](docs/billing.md)
-- [Billing finalization](docs/billing-finalization.md)
+- [ClickHouse Cloud analytics](docs/clickhouse-cloud.md)
 - [Webhook delivery](docs/webhook-delivery.md)
 - [OpenTelemetry](docs/otel_tracing.md)
 - [Multi-tenant scaling and webhooks](docs/scaling.md)
-- [Durable outer-loop scenarios](docs/demo.md)
 - [Failure modes](docs/failure_modes.md)
 
 ## Known Limitations
@@ -414,9 +331,6 @@ See [docs/otel_tracing.md](docs/otel_tracing.md).
 - Kafka publishing is awaited by the session worker; a production runtime should use a
   bounded asynchronous publication buffer or local durable handoff.
 - The POC event envelope lacks tenant, assistant, response, and schema-version fields.
-- Temporal still has a legacy per-call lifecycle workflow for the worker-recovery scenario;
-  the production-inspired path uses Temporal for durable actions, billing
-  finalization, webhook delivery, and call completion.
 - TTS token usage is estimated and should be replaced by provider-reported usage when
   available.
 - The local pricing catalog is manually versioned and is not synchronized from provider
@@ -436,5 +350,5 @@ See [docs/otel_tracing.md](docs/otel_tracing.md).
 - Local Whisper, Ollama, and Piper adapters
 - Provider invoice reconciliation and contract-aware pricing
 - End-of-speech-to-first-audio and Postgres pool-wait metrics
-- Future ClickHouse analytical dashboards for long-range event, cost, transcript, and
+- Broader ClickHouse analytical dashboards for long-range event, cost, transcript, and
   tenant reporting

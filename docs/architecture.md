@@ -6,8 +6,8 @@ company's internal architecture.
 
 The central design rule is that the live media path and the durable control plane have
 different latency and consistency requirements. The session worker handles the live
-turn in memory. Kafka, Postgres, and Temporal sit beside that path; none is the normal
-handoff mechanism between STT, LLM, and TTS.
+turn in memory. Kafka, Postgres, ClickHouse, and Temporal sit beside that path; none is
+the normal handoff mechanism between STT, LLM, and TTS.
 
 ## Target Architecture
 
@@ -40,6 +40,7 @@ flowchart LR
     Kafka --> WorkflowBridge["Temporal starter / signaler"]
 
     Writers --> Postgres["Postgres system of record"]
+    Postgres -. "CDC for ledger analytics" .-> ClickHouse
     CHConsumer --> ClickHouse["ClickHouse Cloud analytics store"]
     WorkflowBridge --> Temporal["Temporal durable outer loop"]
     Temporal --> Activities["Activities"]
@@ -113,9 +114,10 @@ persisted by asynchronous consumers or outbox workers.
 
 ### ClickHouse Cloud
 
-ClickHouse Cloud is the historical analytics projection for coarse events. It is useful
-for cross-call questions such as provider latency trends, calls affected by corking,
-barge-in outcomes, noise-like turns ignored, and reliability comparisons over time.
+ClickHouse Cloud is the historical analytics projection for coarse events and
+billing-facing analytical tables. It is useful for cross-call questions such as
+provider latency trends, calls affected by corking, barge-in outcomes, noise-like turns
+ignored, tenant usage, billing ledger analysis, and reliability comparisons over time.
 
 ClickHouse does not replace Postgres, Prometheus, or Jaeger:
 
@@ -129,10 +131,15 @@ ClickHouse acknowledges a batch insert. If ClickHouse is unavailable, the consum
 retries and dashboards become stale; active calls continue normally. See
 [clickhouse-cloud.md](clickhouse-cloud.md).
 
+For billing analytics, Postgres remains the source of truth and CDC can replicate
+committed ledger rows, manifests, expectations, adjustments, and pricing dimensions into
+ClickHouse. This complements Kafka event analytics rather than replacing the
+transactional ledger.
+
 ### Temporal
 
-Temporal is an optional durable outer loop for work that benefits from persisted
-workflow state, timers, retries, and recovery after worker loss. Good uses include:
+Temporal is the durable outer loop for work that benefits from persisted workflow
+state, timers, retries, and recovery after worker loss. VoiceMesh uses Temporal for:
 
 - post-call completion and finalization;
 - end-of-call webhook delivery retries;
@@ -143,12 +150,10 @@ workflow state, timers, retries, and recovery after worker loss. Good uses inclu
 - long-running customer or external actions.
 
 Temporal is not necessary to maintain an active media stream, and it should not receive
-normal token, audio, turn, cork, or uncork traffic. A simpler deployment may use Kafka
-plus idempotent workers for basic post-call jobs. Temporal is justified when the
-business process needs durable timers, multi-step state, compensation, or retry
-semantics that would otherwise be rebuilt in application code.
+normal token, audio, turn, cork, or uncork traffic. Temporal owns durable business
+processes; the session worker owns the active conversation.
 
-See [kafka_vs_temporal.md](kafka_vs_temporal.md) for the decision boundary.
+See [temporal-workflows.md](temporal-workflows.md) for the workflow catalog.
 
 ## Backpressure
 
@@ -302,7 +307,7 @@ flowchart LR
 | Kafka | Publishes coarse lifecycle, stage, provider, usage, and backpressure events; no raw frames, LLM tokens, or TTS chunks | Add schema registry, W3C headers, lag SLOs, and bounded asynchronous publication |
 | Postgres | Dedicated Kafka event worker projects calls, events, metrics, usage, billing, and idempotency outside the provider chain | Separate ingestion/query pools, reconciliation tooling, and tenant-aware retention |
 | Outbox | Billing events created from a DB usage projection are written atomically to the outbox and published once by the worker | Scale publishers with leases, stronger delivery metrics, and explicit event ownership |
-| Temporal | Legacy call lifecycle workflow plus durable action, billing finalization, webhook delivery, and call completion workflows; routine cork/uncork stays in memory | Keep Temporal on durable outer-loop work only and move hot-path provider/tool decisions into session workers |
+| Temporal | Durable action, billing finalization, webhook delivery, and call completion workflows; routine cork/uncork stays in memory | Run Temporal Cloud or a hardened Temporal cluster for durable workflows while keeping hot-path provider/tool decisions inside session workers |
 | Billing | Versioned price catalog, immutable usage records, per-call rollup, and dashboard; TTS token units are estimated | Provider invoice reconciliation, contract rates, taxes/credits, and tenant wallets |
 | Identity | `call_id`, `turn_id`, sequence, event ID, trace ID | Add tenant, assistant, response, schema version, and propagated trace context |
 | Deployment | Single-host Docker Compose | Replicated services, call-aware routing, autoscaling, quotas, and failure-domain isolation |
