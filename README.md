@@ -44,7 +44,8 @@ Read [docs/architecture.md](docs/architecture.md) for the full model,
 and barge-in, and [docs/vad-and-endpointing.md](docs/vad-and-endpointing.md) for noisy
 environment tuning. See [docs/backpressure.md](docs/backpressure.md) for the hot-path
 flow-control model and [docs/barge-in.md](docs/barge-in.md) for candidate-confirmation
-interruption handling.
+interruption handling. Read [docs/scaling.md](docs/scaling.md) for the production
+deployment path toward 1M to 5M calls.
 
 ## Current POC
 
