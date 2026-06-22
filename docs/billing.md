@@ -12,16 +12,22 @@ flowchart LR
     LLM["LLM adapter"] -->|"provider token usage"| Usage
     TTS["TTS adapter"] -->|"text + PCM duration estimates"| Usage
     Barrier["usage.finalization_barrier"] --> Usage
+    Ended["call.ended"] --> Temporal["BillingFinalizationWorkflow"]
     Usage --> Worker["UsageWriter / Kafka event worker"]
     Worker -->|"batched idempotent transaction"| Records["Postgres usage_records"]
     Worker --> Manifest["manifest + expectations"]
     Worker --> Watermark["projection_watermarks"]
+    Worker -->|"UsageProjectionUpdated"| Temporal
     Catalog["pricing_catalog"] --> Worker
     Worker --> Rollup["Postgres call_billing"]
     Worker --> Outbox["Postgres outbox_events"]
+    Temporal -->|"waits for manifest + watermark + usage"| Records
+    Temporal --> Final["final_call_billing_records"]
     Outbox --> BillingTopic["billing-events"]
     Records --> API["Billing API"]
     Rollup --> API
+    Final --> API
+    Records -. "CDC" .-> ClickHouse["ClickHouse billing analytics"]
     API --> Dashboard["/billing dashboard"]
 ```
 
@@ -31,6 +37,12 @@ the durable bill. At call end it emits `usage.finalization_barrier`, also keyed 
 same call. The event worker consumes in bounded batches, inserts idempotency keys and
 usage rows, applies the price catalog, updates rollups, stores the manifest/expectations,
 and advances projection watermarks in one database transaction.
+
+`BillingFinalizationWorkflow` starts from call completion, then waits for the manifest,
+the projected Kafka watermark, and expected per-turn usage before writing the final
+invoice-like snapshot. Usage that arrives after finalization is recorded as an immutable
+adjustment rather than mutating the original ledger. See
+[temporal-workflows.md](temporal-workflows.md) for the workflow states and full flow.
 
 ## Metered Units
 
@@ -66,6 +78,11 @@ The dashboard reads:
 - `GET /billing/summary`
 - `GET /billing/calls`
 - `GET /billing/calls/{call_id}`
+
+For larger deployments, Kafka remains useful for event-time billing facts and
+ClickHouse-facing call timelines. CDC from Postgres to ClickHouse is the production
+path for billing analytics that must match committed ledger rows, manifests,
+adjustments, and tenant dimensions.
 
 ## Idempotency And Recovery
 
